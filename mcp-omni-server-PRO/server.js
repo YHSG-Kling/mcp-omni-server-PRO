@@ -81,6 +81,119 @@ function client(name) {
   if (!key) return null;
   return makeClient({ baseURL: p.baseURL, headers: p.headers(key) });
 }
+// ---- Route debug (optional) ----
+app.get('/routes', (_req, res) => {
+  try {
+    const list = (app._router.stack || [])
+      .filter(r => r.route)
+      .map(r => ({ method: Object.keys(r.route.methods)[0].toUpperCase(), path: r.route.path }));
+    res.json({ ok: true, routes: list });
+  } catch (e) {
+    res.json({ ok: false, error: String(e?.message || e) });
+  }
+});
+// ---- Scrape a list of URLs (blocking) ----
+app.post('/api/scrape', async (req, res) => {
+  try {
+    const apify = client('apify'); // uses APIFY_TOKEN if set
+    const { urls = [] } = req.body || {};
+    const list = Array.isArray(urls) ? urls.filter(Boolean) : [];
+    if (!list.length) return res.status(400).json({ ok: false, error: 'urls[] required' });
+
+    // "Hard" hosts (IG/FB) – we’ll pass through with placeholders so your flow keeps geo/url context
+    const hardHosts = ['instagram.com', 'm.facebook.com', 'facebook.com'];
+    const isHard = u => hardHosts.some(h => (u || '').includes(h));
+    const hard = list.filter(isHard);
+    const easy = list.filter(u => !isHard(u));
+
+    // If Apify is available, use Web Scraper actor and return dataset items
+    if (apify && easy.length) {
+      const input = {
+        startUrls: easy.map(u => ({ url: u })),
+        maxRequestsPerCrawl: easy.length,
+        proxyConfiguration: { useApifyProxy: true },
+        pageFunction:
+`async function pageFunction(context) {
+  const { request } = context;
+  const title = document.title || '';
+  let text = '';
+  try { text = document.body ? document.body.innerText : ''; } catch(e){}
+  return { url: request.url, title, content: (text || '').slice(0, 20000) };
+}`
+      };
+
+      // Start run
+      const start = await apify.post('/v2/acts/apify~web-scraper/runs', input);
+      const runId = start.data?.data?.id;
+      if (!runId) throw new Error('No Apify run id from /runs');
+
+      // Poll for completion
+      const wait = ms => new Promise(r => setTimeout(r, ms));
+      let status = 'RUNNING', datasetId = null, tries = 0;
+      while (tries < 25) {
+        const st = await apify.get(`/v2/actor-runs/${runId}`);
+        status    = st.data?.data?.status;
+        datasetId = st.data?.data?.defaultDatasetId;
+        if (status === 'SUCCEEDED' && datasetId) break;
+        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) {
+          throw new Error(`Apify run ${status}`);
+        }
+        await wait(1500); tries++;
+      }
+
+      let items = [];
+      if (status === 'SUCCEEDED' && datasetId) {
+        const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+        const raw = Array.isArray(resp.data) ? resp.data : [];
+        const seen = new Set();
+        items = raw
+          .map(r => ({ url: r.url, title: r.title || '', content: r.content || '' }))
+          .filter(it => it.url && !seen.has(it.url) && seen.add(it.url));
+      }
+
+      // Add placeholders for hard sites so flow continues
+      for (const u of hard) items.push({ url: u, title: '', content: '' });
+
+      return res.json({
+        ok: true,
+        items,
+        provider: 'apify|fallback',
+        note: hard.length ? 'Some hosts returned placeholders (IG/FB).' : undefined
+      });
+    }
+
+    // ---- Fallback (no APIFY_TOKEN): simple HTTP GET for each easy URL
+    const out = [];
+    for (const u of list) {
+      try {
+        if (isHard(u)) {
+          out.push({ url: u, title: '', content: '' });
+          continue;
+        }
+        const r = await axios.get(u, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const html = String(r.data || '');
+        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+        const title = titleMatch ? titleMatch[1] : '';
+        // crude strip of tags
+        const text = html
+          .replace(/<script[\s\S]*?<\/script>/gi,'')
+          .replace(/<style[\s\S]*?<\/style>/gi,'')
+          .replace(/<[^>]+>/g,' ')
+          .replace(/\s+/g,' ')
+          .trim();
+        out.push({ url: u, title, content: text.slice(0, 20000) });
+      } catch (e) {
+        console.error('[scrape] fallback error for', u, e?.response?.status || e.message);
+        out.push({ url: u, title: '', content: '' });
+      }
+    }
+    return res.json({ ok: true, items: out, provider: 'fallback' });
+  } catch (e) {
+    console.error('scrape fatal:', e?.response?.data || e.message);
+    return res.status(500).json({ ok: false, error: 'scrape failed' });
+  }
+});
+
 
 app.post('/api/discover', async (req, res) => {
   try {
@@ -101,6 +214,8 @@ app.post('/api/discover', async (req, res) => {
 
     const allItems = [];
     const seen = new Set();
+
+
 
     for (const loc of locs) {
       const userPrompt = qList.length ? qList.map(q => `• ${q}`).join('\n') : 'buyer intent signals for real estate';

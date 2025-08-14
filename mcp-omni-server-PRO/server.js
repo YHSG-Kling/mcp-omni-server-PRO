@@ -82,80 +82,128 @@ function client(name) {
   return makeClient({ baseURL: p.baseURL, headers: p.headers(key) });
 }
 
-// ---- 1) Discover (Perplexity) ----
+// ---- 1) Discover (Perplexity w/ Apify fallback) ----
 app.post('/api/discover', async (req, res) => {
   try {
     const perplex = client('perplexity');
+    const apify   = client('apify');
     const { queries = [], location = {} } = req.body || {};
 
-    if (!perplex) {
-      // Graceful mock so your flow still runs while you wire keys
-      const items = (queries || []).slice(0, 3).map((q, i) => ({
-        title: `Seed: ${q}`,
-        url: `https://www.reddit.com/search/?q=${encodeURIComponent(q)}`,
-        platform: 'web'
-      }));
-      return res.json({ ok: true, items, provider: 'mock' });
-    }
-
-    const qList = Array.isArray(queries) ? queries : [String(queries)].filter(Boolean);
+    // Normalize queries
+    const qList = Array.isArray(queries) ? queries.filter(Boolean) : [String(queries)].filter(Boolean);
     const userPrompt = qList.length ? qList.map(q => `• ${q}`).join('\n') : 'buyer intent signals for real estate';
 
-    const payload = {
-      model: process.env.PPLX_MODEL || 'sonar',  // 'sonar' or 'sonar-pro'
-      messages: [
-        { role: 'system', content: 'You are a lead intelligence researcher for real estate buyer intent.' },
-        { role: 'user', content:
-`Find fresh public posts/pages that signal buyers in ${location.city || ''}, ${location.state || ''}.
-Prefer reddit.com, facebook.com, instagram.com, youtube.com, zillow.com, realtor.com.
-Return a compact JSON with key "items" = array of {title, url, platform, contentSnippet}.
+    const allowedDomains = [
+      'reddit.com','facebook.com','m.facebook.com','instagram.com','youtube.com','youtu.be',
+      'zillow.com','realtor.com','nextdoor.com','x.com','twitter.com','linkedin.com'
+    ];
+    const isAllowed = (u) => {
+      try { const h = new URL(u).hostname.replace(/^www\./, ''); return allowedDomains.some(d => h.endsWith(d)); }
+      catch { return false; }
+    };
+
+    let items = [];
+
+    // -------- First try: Perplexity (Sonar)
+    if (perplex) {
+      try {
+        const payload = {
+          model: process.env.PPLX_MODEL || 'sonar',  // 'sonar' or 'sonar-pro'
+          messages: [
+            { role: 'system', content: 'You are a lead intelligence researcher for real estate buyer intent.' },
+            { role: 'user', content:
+`Find fresh public posts/pages that signal active home-buying in ${location.city || ''}, ${location.state || ''}.
+Prefer reddit.com, facebook.com, instagram.com, youtube.com, zillow.com, realtor.com, nextdoor.com, x.com, linkedin.com.
+Return JSON with "items": [{title, url, platform, contentSnippet}].
 
 Queries:
 ${userPrompt}`
+            }
+          ],
+          stream: false,
+          // nudge to browse fresher content
+          search_recency_filter: 'week'
+        };
+
+        const r = await perplex.post('/chat/completions', payload);
+        const data = r.data || {};
+
+        // 1) Use structured search results if present
+        if (Array.isArray(data.search_results)) {
+          items = data.search_results
+            .map(s => ({ title: s.title || 'Found', url: s.url, platform: 'web', contentSnippet: s.snippet || '' }))
+            .filter(i => isAllowed(i.url));
         }
-      ],
-      stream: false
-    };
 
-    const r = await perplex.post('/chat/completions', payload);
-    const data = r.data || {};
-    let items = [];
-
-    // Newer responses often include structured search results
-    if (Array.isArray(data.search_results)) {
-      items = data.search_results.map(s => ({
-        title: s.title || 'Found',
-        url: s.url,
-        platform: 'web',
-        contentSnippet: s.snippet || ''
-      }));
-    }
-
-    // Fallback: parse JSON or URLs out of the text
-    if ((!items || items.length === 0) && data.choices?.[0]?.message?.content) {
-      const txt = data.choices[0].message.content;
-      try {
-        const parsed = JSON.parse(txt);
-        if (Array.isArray(parsed.items)) {
-          items = parsed.items.map(o => ({
-            title: o.title || 'Found',
-            url: o.url,
-            platform: o.platform || 'web',
-            contentSnippet: o.content || o.contentSnippet || ''
-          }));
+        // 2) Fallback: parse JSON or URLs out of message text
+        if ((!items || items.length === 0) && data.choices?.[0]?.message?.content) {
+          const txt = data.choices[0].message.content;
+          try {
+            const parsed = JSON.parse(txt);
+            if (Array.isArray(parsed.items)) {
+              items = parsed.items
+                .map(o => ({ title: o.title || 'Found', url: o.url, platform: o.platform || 'web', contentSnippet: o.content || o.contentSnippet || '' }))
+                .filter(i => isAllowed(i.url));
+            }
+          } catch {
+            const urlRegex = /(https?:\/\/[^\s)]+)\)?/g;
+            const urls = [...txt.matchAll(urlRegex)].map(m => m[1]).filter(isAllowed);
+            items = urls.slice(0, 20).map(u => ({ title: 'Found', url: u, platform: 'web', contentSnippet: '' }));
+          }
         }
-      } catch (_) {
-        const urlRegex = /(https?:\/\/[^\s)]+)\)?/g;
-        const urls = [...txt.matchAll(urlRegex)].map(m => m[1]);
-        items = urls.slice(0, 20).map(u => ({ title: 'Found', url: u, platform: 'web', contentSnippet: '' }));
+      } catch (e) {
+        console.error('[discover] Perplexity error => continuing to Apify fallback:', e?.response?.data || e.message);
       }
     }
 
-    return res.json({ ok: true, items, provider: 'perplexity', location });
+    // -------- Second try: Apify Google Search (guaranteed URLs)
+    if ((!items || items.length === 0) && apify && qList.length) {
+      try {
+        // Build search phrases with local intent
+        const gsQueries = qList.map(q => `${q} site:(${allowedDomains.join(' OR ')}) ${location.city || ''} ${location.state || ''}`.trim());
+
+        const start = await apify.post('/v2/acts/apify~google-search-scraper/runs', {
+          queries: gsQueries,
+          maxPagesPerQuery: 1,
+          resultsPerPage: 10,
+          countryCode: 'us',
+          saveHtml: false
+        });
+
+        const runId = start.data?.id;
+        if (!runId) throw new Error('No Apify run id');
+
+        // Poll for completion (≤ ~30s)
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        let status = 'RUNNING', datasetId = null, tries = 0;
+        while (tries < 20) {
+          const st = await apify.get(`/v2/actor-runs/${runId}`);
+          status = st.data?.status;
+          datasetId = st.data?.defaultDatasetId;
+          if (status === 'SUCCEEDED' && datasetId) break;
+          if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
+          await wait(1500); tries++;
+        }
+
+        if (status === 'SUCCEEDED' && datasetId) {
+          const itemsResp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+          const raw = Array.isArray(itemsResp.data) ? itemsResp.data : [];
+          const seen = new Set();
+          items = raw
+            .map(r => ({ title: r.title || 'Found', url: r.url, platform: 'web', contentSnippet: r.snippet || '' }))
+            .filter(i => i.url && isAllowed(i.url) && !seen.has(i.url) && seen.add(i.url))
+            .slice(0, 25);
+        }
+      } catch (e) {
+        console.error('[discover] Apify fallback error:', e?.response?.data || e.message);
+      }
+    }
+
+    // Final: always return ok:true with items (possibly empty) so n8n continues
+    return res.json({ ok: true, items, provider: items.length ? 'perplexity|apify' : 'none', location });
   } catch (e) {
-    console.error('discover error:', e?.response?.data || e.message);
-    // Keep pipeline alive: return ok:true with empty items
-    return res.status(200).json({ ok: true, items: [], warning: 'discover failed upstream; returned empty list' });
+    console.error('discover fatal:', e?.response?.data || e.message);
+    return res.status(200).json({ ok: true, items: [], warning: 'discover failed; returned empty list' });
   }
 });
 

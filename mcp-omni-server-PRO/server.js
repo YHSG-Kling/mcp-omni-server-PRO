@@ -87,30 +87,75 @@ app.post('/api/discover', async (req, res) => {
   try {
     const perplex = client('perplexity');
     const { queries = [], location = {} } = req.body || {};
+
     if (!perplex) {
-      // Mock so your flow still runs
-      const items = queries.slice(0,3).map((q,i)=> ({
-        platform: 'web',
-        url: `https://example.com/result-${i+1}`,
-        content: `Public mention near ${location.city || 'your area'}: ${q}`,
-        signals: ['moving','looking for'],
-        timestamp: new Date().toISOString()
+      // Graceful mock so your flow still runs while you wire keys
+      const items = (queries || []).slice(0, 3).map((q, i) => ({
+        title: `Seed: ${q}`,
+        url: `https://www.reddit.com/search/?q=${encodeURIComponent(q)}`,
+        platform: 'web'
       }));
-      return res.json({ items, provider:'mock' });
+      return res.json({ ok: true, items, provider: 'mock' });
     }
-    const outputs = [];
-    for (const q of queries) {
-      const r = await perplex.post('/chat/completions', {
-        model: 'sonar-small-online',
-        messages: [{ role:'user', content: q }],
-        search_domain_filter: ['reddit.com','facebook.com','instagram.com','youtube.com','zillow.com','realtor.com']
-      });
-      outputs.push(r.data);
+
+    const qList = Array.isArray(queries) ? queries : [String(queries)].filter(Boolean);
+    const userPrompt = qList.length ? qList.map(q => `• ${q}`).join('\n') : 'buyer intent signals for real estate';
+
+    const payload = {
+      model: process.env.PPLX_MODEL || 'sonar',  // 'sonar' or 'sonar-pro'
+      messages: [
+        { role: 'system', content: 'You are a lead intelligence researcher for real estate buyer intent.' },
+        { role: 'user', content:
+`Find fresh public posts/pages that signal buyers in ${location.city || ''}, ${location.state || ''}.
+Prefer reddit.com, facebook.com, instagram.com, youtube.com, zillow.com, realtor.com.
+Return a compact JSON with key "items" = array of {title, url, platform, contentSnippet}.
+
+Queries:
+${userPrompt}`
+        }
+      ],
+      stream: false
+    };
+
+    const r = await perplex.post('/chat/completions', payload);
+    const data = r.data || {};
+    let items = [];
+
+    // Newer responses often include structured search results
+    if (Array.isArray(data.search_results)) {
+      items = data.search_results.map(s => ({
+        title: s.title || 'Found',
+        url: s.url,
+        platform: 'web',
+        contentSnippet: s.snippet || ''
+      }));
     }
-    res.json({ items: outputs, provider: 'perplexity' });
+
+    // Fallback: parse JSON or URLs out of the text
+    if ((!items || items.length === 0) && data.choices?.[0]?.message?.content) {
+      const txt = data.choices[0].message.content;
+      try {
+        const parsed = JSON.parse(txt);
+        if (Array.isArray(parsed.items)) {
+          items = parsed.items.map(o => ({
+            title: o.title || 'Found',
+            url: o.url,
+            platform: o.platform || 'web',
+            contentSnippet: o.content || o.contentSnippet || ''
+          }));
+        }
+      } catch (_) {
+        const urlRegex = /(https?:\/\/[^\s)]+)\)?/g;
+        const urls = [...txt.matchAll(urlRegex)].map(m => m[1]);
+        items = urls.slice(0, 20).map(u => ({ title: 'Found', url: u, platform: 'web', contentSnippet: '' }));
+      }
+    }
+
+    return res.json({ ok: true, items, provider: 'perplexity', location });
   } catch (e) {
     console.error('discover error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'discover failed' });
+    // Keep pipeline alive: return ok:true with empty items
+    return res.status(200).json({ ok: true, items: [], warning: 'discover failed upstream; returned empty list' });
   }
 });
 
@@ -119,22 +164,61 @@ app.post('/api/scrape', async (req, res) => {
   try {
     const apify = client('apify');
     const { urls = [] } = req.body || {};
-    if (!apify) {
-      const out = urls.map((u,i)=>({ url: u, content: `Sample text from ${u}`, platform:'web' }));
-      return res.json({ items: out, provider:'mock' });
+    if (!Array.isArray(urls) || urls.length === 0) {
+      return res.status(400).json({ ok: false, error: 'urls[] required' });
     }
-    // Start a simple web-scraper run; you can fetch dataset later
+
+    if (!apify) {
+      const out = urls.map(u => ({ url: u, content: `Sample text from ${u}`, platform:'web' }));
+      return res.json({ ok: true, items: out, provider: 'mock' });
+    }
+
+    // Start a scraper run
     const start = await apify.post('/v2/acts/apify~web-scraper/runs', {
       startUrls: urls.map(u => ({ url: u })),
-      pageFunction: "async function pageFunction(context){ const text = document.body.innerText.slice(0,5000); return { url: context.request.url, content: text }; }",
+      pageFunction:
+        "async function pageFunction(context){ const text = document.body.innerText.slice(0,5000); return { url: context.request.url, text }; }",
       proxyConfiguration: { useApifyProxy: true }
     });
-    res.json({ runId: start.data?.id, provider:'apify', note:'Poll Apify dataset for results when finished.' });
+
+    const runId = start.data?.id;
+    if (!runId) throw new Error('No Apify run id');
+
+    // Poll for completion
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    let status = 'RUNNING', datasetId = null, tries = 0;
+
+    while (tries < 20) { // ~30s with 1500ms delay
+      const st = await apify.get(`/v2/actor-runs/${runId}`);
+      status = st.data?.status;
+      datasetId = st.data?.defaultDatasetId;
+      if (status === 'SUCCEEDED' && datasetId) break;
+      if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
+      await wait(1500);
+      tries++;
+    }
+
+    if (status !== 'SUCCEEDED' || !datasetId) {
+      return res.json({ ok: true, items: [], warning: `Apify status ${status}` });
+    }
+
+    // Fetch items
+    const itemsResp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+    const items = Array.isArray(itemsResp.data)
+      ? itemsResp.data.map(it => ({
+          url: it.url,
+          content: it.text || it.content || '',
+          platform: 'web'
+        }))
+      : [];
+
+    return res.json({ ok: true, items, provider: 'apify' });
   } catch (e) {
     console.error('scrape error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'scrape failed' });
+    return res.status(200).json({ ok: true, items: [], warning: 'scrape failed; returned empty list' });
   }
 });
+
 
 // ---- 3) Fuse + Score (relocation/PCS + geo + safe) ----
 app.post('/api/fuse-score', (req, res) => {

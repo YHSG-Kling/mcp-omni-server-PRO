@@ -82,7 +82,7 @@ function client(name) {
   return makeClient({ baseURL: p.baseURL, headers: p.headers(key) });
 }
 
-// ---- 1) Discover (Perplexity w/ Apify fallback) ----
+// ---- 1) Discover (Perplexity w/ Apify fallback, model+queries fixed) ----
 app.post('/api/discover', async (req, res) => {
   try {
     const perplex = client('perplexity');
@@ -92,6 +92,9 @@ app.post('/api/discover', async (req, res) => {
     // Normalize queries
     const qList = Array.isArray(queries) ? queries.filter(Boolean) : [String(queries)].filter(Boolean);
     const userPrompt = qList.length ? qList.map(q => `• ${q}`).join('\n') : 'buyer intent signals for real estate';
+
+    // Force valid, lowercase model name
+    const model = ((process.env.PPLX_MODEL || 'sonar') + '').trim().toLowerCase(); // e.g., 'sonar' | 'sonar-pro'
 
     const allowedDomains = [
       'reddit.com','facebook.com','m.facebook.com','instagram.com','youtube.com','youtu.be',
@@ -104,11 +107,11 @@ app.post('/api/discover', async (req, res) => {
 
     let items = [];
 
-    // -------- First try: Perplexity (Sonar)
+    // -------- First try: Perplexity
     if (perplex) {
       try {
         const payload = {
-          model: process.env.PPLX_MODEL || 'sonar',  // 'sonar' or 'sonar-pro'
+          model,
           messages: [
             { role: 'system', content: 'You are a lead intelligence researcher for real estate buyer intent.' },
             { role: 'user', content:
@@ -121,21 +124,21 @@ ${userPrompt}`
             }
           ],
           stream: false,
-          // nudge to browse fresher content
+          // nudge for freshness
           search_recency_filter: 'week'
         };
 
         const r = await perplex.post('/chat/completions', payload);
         const data = r.data || {};
 
-        // 1) Use structured search results if present
+        // 1) structured search_results
         if (Array.isArray(data.search_results)) {
           items = data.search_results
             .map(s => ({ title: s.title || 'Found', url: s.url, platform: 'web', contentSnippet: s.snippet || '' }))
             .filter(i => isAllowed(i.url));
         }
 
-        // 2) Fallback: parse JSON or URLs out of message text
+        // 2) fallback: parse text for JSON or links
         if ((!items || items.length === 0) && data.choices?.[0]?.message?.content) {
           const txt = data.choices[0].message.content;
           try {
@@ -156,14 +159,16 @@ ${userPrompt}`
       }
     }
 
-    // -------- Second try: Apify Google Search (guaranteed URLs)
+    // -------- Second try: Apify Google Search (requires queries as STRING)
     if ((!items || items.length === 0) && apify && qList.length) {
       try {
-        // Build search phrases with local intent
-        const gsQueries = qList.map(q => `${q} site:(${allowedDomains.join(' OR ')}) ${location.city || ''} ${location.state || ''}`.trim());
+        // Build local-intent queries and join as newline string (actor expects string)
+        const gsQueriesString = qList
+          .map(q => `${q} site:(${allowedDomains.join(' OR ')}) ${location.city || ''} ${location.state || ''}`.trim())
+          .join('\n');
 
         const start = await apify.post('/v2/acts/apify~google-search-scraper/runs', {
-          queries: gsQueries,
+          queries: gsQueriesString,          // <-- string not array
           maxPagesPerQuery: 1,
           resultsPerPage: 10,
           countryCode: 'us',
@@ -173,7 +178,7 @@ ${userPrompt}`
         const runId = start.data?.id;
         if (!runId) throw new Error('No Apify run id');
 
-        // Poll for completion (≤ ~30s)
+        // Poll for completion
         const wait = ms => new Promise(r => setTimeout(r, ms));
         let status = 'RUNNING', datasetId = null, tries = 0;
         while (tries < 20) {
@@ -199,7 +204,6 @@ ${userPrompt}`
       }
     }
 
-    // Final: always return ok:true with items (possibly empty) so n8n continues
     return res.json({ ok: true, items, provider: items.length ? 'perplexity|apify' : 'none', location });
   } catch (e) {
     console.error('discover fatal:', e?.response?.data || e.message);

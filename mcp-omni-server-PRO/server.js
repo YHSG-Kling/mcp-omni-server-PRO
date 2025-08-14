@@ -82,7 +82,7 @@ function client(name) {
   return makeClient({ baseURL: p.baseURL, headers: p.headers(key) });
 }
 
-// ---- 1) Discover (Perplexity w/ Apify fallback, model+queries fixed) ----
+// ---- 1) Discover (Perplexity w/ Apify fallback, model+queries+Apify v2 shape fixed) ----
 app.post('/api/discover', async (req, res) => {
   try {
     const perplex = client('perplexity');
@@ -93,15 +93,15 @@ app.post('/api/discover', async (req, res) => {
     const qList = Array.isArray(queries) ? queries.filter(Boolean) : [String(queries)].filter(Boolean);
     const userPrompt = qList.length ? qList.map(q => `• ${q}`).join('\n') : 'buyer intent signals for real estate';
 
-    // Force valid, lowercase model name
-    const model = ((process.env.PPLX_MODEL || 'sonar') + '').trim().toLowerCase(); // e.g., 'sonar' | 'sonar-pro'
+    // Force valid, lowercase model name (Perplexity rejects "Sonar"/"Sonar-Pro")
+    const model = ((process.env.PPLX_MODEL || 'sonar') + '').trim().toLowerCase(); // 'sonar' or 'sonar-pro'
 
     const allowedDomains = [
       'reddit.com','facebook.com','m.facebook.com','instagram.com','youtube.com','youtu.be',
       'zillow.com','realtor.com','nextdoor.com','x.com','twitter.com','linkedin.com'
     ];
     const isAllowed = (u) => {
-      try { const h = new URL(u).hostname.replace(/^www\./, ''); return allowedDomains.some(d => h.endsWith(d)); }
+      try { const h = new URL(u).hostname.replace(/^www\./,''); return allowedDomains.some(d => h.endsWith(d)); }
       catch { return false; }
     };
 
@@ -120,25 +120,24 @@ Prefer reddit.com, facebook.com, instagram.com, youtube.com, zillow.com, realtor
 Return JSON with "items": [{title, url, platform, contentSnippet}].
 
 Queries:
-${userPrompt}`
-            }
+${userPrompt}` }
           ],
           stream: false,
-          // nudge for freshness
+          // nudge for freshness (Perplexity supports recency filters)
           search_recency_filter: 'week'
         };
 
         const r = await perplex.post('/chat/completions', payload);
         const data = r.data || {};
 
-        // 1) structured search_results
+        // Use structured search_results if present
         if (Array.isArray(data.search_results)) {
           items = data.search_results
             .map(s => ({ title: s.title || 'Found', url: s.url, platform: 'web', contentSnippet: s.snippet || '' }))
             .filter(i => isAllowed(i.url));
         }
 
-        // 2) fallback: parse text for JSON or links
+        // Fallback: parse JSON or links from the message
         if ((!items || items.length === 0) && data.choices?.[0]?.message?.content) {
           const txt = data.choices[0].message.content;
           try {
@@ -159,7 +158,7 @@ ${userPrompt}`
       }
     }
 
-    // -------- Second try: Apify Google Search (requires queries as STRING)
+    // -------- Second try: Apify Google Search (expects queries as STRING; fix v2 response shapes)
     if ((!items || items.length === 0) && apify && qList.length) {
       try {
         // Build local-intent queries and join as newline string (actor expects string)
@@ -167,30 +166,39 @@ ${userPrompt}`
           .map(q => `${q} site:(${allowedDomains.join(' OR ')}) ${location.city || ''} ${location.state || ''}`.trim())
           .join('\n');
 
+        // Start run (NOTE: Apify v2 returns { data: { id, ... } })
         const start = await apify.post('/v2/acts/apify~google-search-scraper/runs', {
-          queries: gsQueriesString,          // <-- string not array
+          queries: gsQueriesString,            // <-- string, not array
           maxPagesPerQuery: 1,
           resultsPerPage: 10,
           countryCode: 'us',
           saveHtml: false
         });
+        const runId = start.data?.data?.id;    // <-- fixed
 
-        const runId = start.data?.id;
-        if (!runId) throw new Error('No Apify run id');
+        if (!runId) {
+          console.error('[discover] Apify start response:', start.data);
+          throw new Error('No Apify run id');
+        }
 
-        // Poll for completion
+        // Poll for completion (≤ ~30s)
         const wait = ms => new Promise(r => setTimeout(r, ms));
         let status = 'RUNNING', datasetId = null, tries = 0;
         while (tries < 20) {
           const st = await apify.get(`/v2/actor-runs/${runId}`);
-          status = st.data?.status;
-          datasetId = st.data?.defaultDatasetId;
+          status    = st.data?.data?.status;           // <-- fixed
+          datasetId = st.data?.data?.defaultDatasetId; // <-- fixed
           if (status === 'SUCCEEDED' && datasetId) break;
-          if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
-          await wait(1500); tries++;
+          if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) {
+            console.error('[discover] Apify run status:', status, 'detail:', st.data);
+            throw new Error(`Apify run ${status}`);
+          }
+          await wait(1500);
+          tries++;
         }
 
         if (status === 'SUCCEEDED' && datasetId) {
+          // Dataset items endpoint returns the array directly (no outer data)
           const itemsResp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
           const raw = Array.isArray(itemsResp.data) ? itemsResp.data : [];
           const seen = new Set();
@@ -204,70 +212,11 @@ ${userPrompt}`
       }
     }
 
+    // Final: always return ok:true with items (possibly empty) so n8n continues
     return res.json({ ok: true, items, provider: items.length ? 'perplexity|apify' : 'none', location });
   } catch (e) {
     console.error('discover fatal:', e?.response?.data || e.message);
     return res.status(200).json({ ok: true, items: [], warning: 'discover failed; returned empty list' });
-  }
-});
-
-// ---- 2) Scrape (Apify generic) ----
-app.post('/api/scrape', async (req, res) => {
-  try {
-    const apify = client('apify');
-    const { urls = [] } = req.body || {};
-    if (!Array.isArray(urls) || urls.length === 0) {
-      return res.status(400).json({ ok: false, error: 'urls[] required' });
-    }
-
-    if (!apify) {
-      const out = urls.map(u => ({ url: u, content: `Sample text from ${u}`, platform:'web' }));
-      return res.json({ ok: true, items: out, provider: 'mock' });
-    }
-
-    // Start a scraper run
-    const start = await apify.post('/v2/acts/apify~web-scraper/runs', {
-      startUrls: urls.map(u => ({ url: u })),
-      pageFunction:
-        "async function pageFunction(context){ const text = document.body.innerText.slice(0,5000); return { url: context.request.url, text }; }",
-      proxyConfiguration: { useApifyProxy: true }
-    });
-
-    const runId = start.data?.id;
-    if (!runId) throw new Error('No Apify run id');
-
-    // Poll for completion
-    const wait = ms => new Promise(r => setTimeout(r, ms));
-    let status = 'RUNNING', datasetId = null, tries = 0;
-
-    while (tries < 20) { // ~30s with 1500ms delay
-      const st = await apify.get(`/v2/actor-runs/${runId}`);
-      status = st.data?.status;
-      datasetId = st.data?.defaultDatasetId;
-      if (status === 'SUCCEEDED' && datasetId) break;
-      if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
-      await wait(1500);
-      tries++;
-    }
-
-    if (status !== 'SUCCEEDED' || !datasetId) {
-      return res.json({ ok: true, items: [], warning: `Apify status ${status}` });
-    }
-
-    // Fetch items
-    const itemsResp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
-    const items = Array.isArray(itemsResp.data)
-      ? itemsResp.data.map(it => ({
-          url: it.url,
-          content: it.text || it.content || '',
-          platform: 'web'
-        }))
-      : [];
-
-    return res.json({ ok: true, items, provider: 'apify' });
-  } catch (e) {
-    console.error('scrape error:', e?.response?.data || e.message);
-    return res.status(200).json({ ok: true, items: [], warning: 'scrape failed; returned empty list' });
   }
 });
 

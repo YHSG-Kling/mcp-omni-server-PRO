@@ -100,10 +100,10 @@ app.get('/routes', (_req, res) => {
     res.json({ ok: false, error: String(e?.message || e) });
   }
 });
-// ---- Scrape a list of URLs (blocking) ----
+// ---- Scrape a list of URLs (quota-friendly, chunked, graceful fallback) ----
 app.post('/api/scrape', async (req, res) => {
   try {
-    const apify = client('apify');
+    const apify = client('apify'); // uses APIFY_TOKEN if set
 
     // Normalize input: accept urls[] or scrapeUrls/socialUrls/holdUrls
     const body = req.body || {};
@@ -114,12 +114,8 @@ app.post('/api/scrape', async (req, res) => {
     else if (Array.isArray(body.holdUrls) && body.holdUrls.length) list = body.holdUrls;
 
     // Sanitize + dedupe
-    list = [...new Set((list || [])
-      .filter(u => typeof u === 'string' && /^https?:\/\//i.test(u)))];
-
-    if (!list.length) {
-      return res.status(400).json({ ok: false, error: 'urls[] required' });
-    }
+    list = [...new Set((list || []).filter(u => typeof u === 'string' && /^https?:\/\//i.test(u)))];
+    if (!list.length) return res.status(400).json({ ok: false, error: 'urls[] required' });
 
     // Optional geo context passthrough for scoring
     const cityMap  = body.urlCityMap  || {};
@@ -133,21 +129,29 @@ app.post('/api/scrape', async (req, res) => {
         return hardHosts.some(d => h === d || h.endsWith('.' + d));
       } catch { return false; }
     };
-
     const hard = list.filter(isHard);
     const easy = list.filter(u => !isHard(u));
 
     let items = [];
 
-    // Prefer Apify full-browser scrape for JS-heavy sites (Redfin/Zillow/etc.)
-    if (apify && easy.length) {
+    // === Apify chunked runs (low memory) ===
+    // Tunables via env if you want: APIFY_MEMORY, APIFY_TIMEOUT_SEC, APIFY_MAX_CONCURRENCY, APIFY_CHUNK_SIZE
+    const CHUNK_SIZE        = Math.max(1, Number(process.env.APIFY_CHUNK_SIZE || 6));
+    const MEMORY_MB         = Math.max(256, Number(process.env.APIFY_MEMORY || 1024));   // 512–1024 recommended on free tier
+    const TIMEOUT_SEC       = Math.max(60,  Number(process.env.APIFY_TIMEOUT_SEC || 120));
+    const MAX_CONCURRENCY   = Math.max(1,   Number(process.env.APIFY_MAX_CONCURRENCY || 3));
+    const MAX_RETRIES       = 2;
+
+    async function runApifyChunk(urlsChunk) {
       const input = {
-        startUrls: easy.map(u => ({ url: u })),
-        maxRequestsPerCrawl: Math.min(easy.length, 30),
-        maxConcurrency: 5,
+        startUrls: urlsChunk.map(u => ({ url: u })),
+        maxRequestsPerCrawl: urlsChunk.length,
         useChrome: true,
         stealth: true,
         proxyConfiguration: { useApifyProxy: true },
+        maxConcurrency: MAX_CONCURRENCY,
+        maxRequestRetries: MAX_RETRIES,
+        navigationTimeoutSecs: 45,
         pageFunction: `
           async function pageFunction(context) {
             const { request, log } = context;
@@ -157,11 +161,13 @@ app.post('/api/scrape', async (req, res) => {
             return { url: request.url, title, content: (text || '').slice(0, 20000) };
           }
         `,
-        maxRequestRetries: 2,
-        navigationTimeoutSecs: 45
       };
 
-      const start = await apify.post('/v2/acts/apify~web-scraper/runs', input);
+      // IMPORTANT: set memory + timeout via query params so we don’t exceed your quota
+      const start = await apify.post(
+        `/v2/acts/apify~web-scraper/runs?memory=${MEMORY_MB}&timeout=${TIMEOUT_SEC}`,
+        input
+      );
       const runId = start?.data?.data?.id;
       if (!runId) throw new Error('No Apify run id from /runs');
 
@@ -181,18 +187,36 @@ app.post('/api/scrape', async (req, res) => {
         const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
         const raw = Array.isArray(resp.data) ? resp.data : [];
         const seen = new Set();
-        items = raw
+        return raw
           .map(r => ({ url: r.url, title: r.title || '', content: r.content || '' }))
           .filter(it => it.url && !seen.has(it.url) && seen.add(it.url));
+      }
+      return [];
+    }
+
+    // Try Apify if token present and we have any easy URLs
+    if (apify && easy.length) {
+      try {
+        for (let i = 0; i < easy.length; i += CHUNK_SIZE) {
+          const chunk = easy.slice(i, i + CHUNK_SIZE);
+          const got = await runApifyChunk(chunk);
+          items.push(...got);
+        }
+      } catch (e) {
+        // If Apify throws (e.g., memory limit), log and continue to fallback
+        console.error('[scrape] Apify error; continuing to fallback:', e?.response?.data || e.message);
       }
     }
 
     // Add placeholders for hard hosts so downstream keeps URL/geo context
     for (const u of hard) items.push({ url: u, title: '', content: '' });
 
-    // Fallback simple GET if no Apify or no items yet
-    if ((!apify || items.length === 0) && easy.length) {
-      for (const u of easy) {
+    // === Fallback Node GET for any easy URLs we didn’t get via Apify ===
+    if (easy.length) {
+      const already = new Set(items.map(i => i.url));
+      const fallbackTargets = easy.filter(u => !already.has(u));
+
+      for (const u of fallbackTargets) {
         try {
           const r = await axios.get(u, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } });
           const html = String(r.data || '');
@@ -218,10 +242,16 @@ app.post('/api/scrape', async (req, res) => {
       state: stateMap[it.url] || it.state || null,
     }));
 
-    return res.json({ ok: true, items, provider: apify ? 'apify|fallback' : 'fallback' });
+    return res.json({
+      ok: true,
+      items,
+      provider: apify ? 'apify|fallback' : 'fallback',
+      note: hard.length ? 'Some hosts returned placeholders (IG/FB/Nextdoor).' : undefined
+    });
   } catch (e) {
     console.error('scrape fatal:', e?.response?.data || e.message);
-    return res.status(500).json({ ok: false, error: 'scrape failed' });
+    // Never 500 to n8n—return ok:true with zero items so your flow keeps going
+    return res.status(200).json({ ok: true, items: [], provider: 'none', warning: 'scrape failed' });
   }
 });
 

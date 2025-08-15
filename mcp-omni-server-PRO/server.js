@@ -98,6 +98,19 @@ app.post('/api/scrape', async (req, res) => {
   try {
     const apify = client('apify'); // uses APIFY_TOKEN if set
     const { urls = [] } = req.body || {};
+    // Accept multiple shapes: urls[] OR scrapeUrls[] OR socialUrls[] OR holdUrls[]
+let list = [];
+if (Array.isArray(urls) && urls.length) list = urls;
+else if (Array.isArray(req.body?.scrapeUrls) && req.body.scrapeUrls.length) list = req.body.scrapeUrls;
+else if (Array.isArray(req.body?.socialUrls) && req.body.socialUrls.length) list = req.body.socialUrls;
+else if (Array.isArray(req.body?.holdUrls) && req.body.holdUrls.length) list = req.body.holdUrls;
+else list = [];
+
+// optional: dedupe & sanitize
+list = [...new Set(list.filter(Boolean))];
+
+if (!list.length) return res.status(400).json({ ok:false, error:'urls[] required' });
+
     const list = Array.isArray(urls) ? urls.filter(Boolean) : [];
     if (!list.length) return res.status(400).json({ ok: false, error: 'urls[] required' });
 
@@ -110,18 +123,27 @@ app.post('/api/scrape', async (req, res) => {
     // If Apify is available, use Web Scraper actor and return dataset items
     if (apify && easy.length) {
       const input = {
-        startUrls: easy.map(u => ({ url: u })),
-        maxRequestsPerCrawl: easy.length,
-        proxyConfiguration: { useApifyProxy: true },
-        pageFunction:
-`async function pageFunction(context) {
-  const { request } = context;
-  const title = document.title || '';
-  let text = '';
-  try { text = document.body ? document.body.innerText : ''; } catch(e){}
-  return { url: request.url, title, content: (text || '').slice(0, 20000) };
-}`
-      };
+  startUrls: list.map(u => ({ url: u })),
+  maxRequestsPerCrawl: Math.min(list.length, 30),
+  maxConcurrency: 5,
+  useChrome: true,            // ← ensures full Chrome
+  stealth: true,              // ← reduces bot detection
+  proxyConfiguration: { useApifyProxy: true },
+  pageFunction: `
+    async function pageFunction(context) {
+      const { request, log } = context;
+      const title = document.title || '';
+      let text = '';
+      try {
+        text = document.body ? document.body.innerText : '';
+      } catch (e) { log.debug('text-read failed'); }
+      return { url: request.url, title, content: (text || '').slice(0, 20000) };
+    }
+  `,
+  maxRequestRetries: 2,
+  navigationTimeoutSecs: 45
+};
+
 
       // Start run
       const start = await apify.post('/v2/acts/apify~web-scraper/runs', input);

@@ -160,6 +160,56 @@ app.post('/api/scrape', async (req, res) => {
         provider: 'apify|fallback',
         note: hard.length ? 'Some hosts returned placeholders (IG/FB).' : undefined
       });
+      app.post('/api/comments', async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    if (!url) return res.status(400).json({ ok:false, error:'url required' });
+
+    const host = new URL(url).hostname.replace(/^www\./,'');
+    const apify = client('apify');
+
+    // YouTube (native API if YOUTUBE_API_KEY set)
+    if (host.endsWith('youtube.com') || host.endsWith('youtu.be')) {
+      const key = process.env.YOUTUBE_API_KEY;
+      const videoId = (url.match(/[?&]v=([^&#]+)/) || [])[1];
+      if (!videoId && !apify) return res.json({ items: [] });
+
+      if (key && videoId) {
+        const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
+          params: { part: 'snippet', videoId, maxResults: 50, key }
+        });
+        const items = (yt.data.items || []).map(c => ({
+          platform: 'youtube',
+          author: c.snippet.topLevelComment.snippet.authorDisplayName,
+          text: c.snippet.topLevelComment.snippet.textDisplay,
+          publishedAt: c.snippet.topLevelComment.snippet.publishedAt
+        }));
+        return res.json({ items, provider: 'youtube-api' });
+      }
+
+      if (apify) {
+        const run = await apify.post('/v2/acts/apify~youtube-comments-scraper/runs', {
+          startUrls: [{ url }], maxComments: 100
+        });
+        // …poll & fetch dataset like your other Apify flows…
+      }
+    }
+
+    // Reddit (simple HTML scrape via Apify if no creds)
+    if (host.endsWith('reddit.com') && apify) {
+      const run = await apify.post('/v2/acts/apify~reddit-scraper/runs', {
+        startUrls: [{ url }], maxItems: 100, includePostComments: true
+      });
+      // …poll & fetch dataset…
+    }
+
+    // FB/IG/Nextdoor – require appropriate actors/tokens; return empty if not configured
+    return res.json({ items: [], provider: 'none' });
+  } catch (e) {
+    console.error('comments error:', e?.response?.data || e.message);
+    res.status(500).json({ ok:false, error:'comments failed' });
+  }
+});
     }
 
     // ---- Fallback (no APIFY_TOKEN): simple HTTP GET for each easy URL
@@ -207,9 +257,11 @@ app.post('/api/discover', async (req, res) => {
 
     const model = ((process.env.PPLX_MODEL || 'sonar') + '').trim().toLowerCase(); // 'sonar' | 'sonar-pro'
     const allowedDomains = [
-      'reddit.com','facebook.com','m.facebook.com','instagram.com','youtube.com','youtu.be',
-      'zillow.com','realtor.com','nextdoor.com','x.com','twitter.com','linkedin.com'
-    ];
+  'reddit.com','facebook.com','m.facebook.com','instagram.com',
+  'youtube.com','youtu.be','zillow.com','realtor.com','redfin.com',
+  'trulia.com','homes.com','apartments.com','nextdoor.com','x.com',
+  'twitter.com','linkedin.com'
+];
     const isAllowed = (u) => { try { const h = new URL(u).hostname.replace(/^www\./,''); return allowedDomains.some(d => h.endsWith(d)); } catch { return false; } };
 
     const allItems = [];

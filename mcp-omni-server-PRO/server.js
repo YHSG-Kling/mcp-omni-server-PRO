@@ -630,7 +630,99 @@ app.post('/webhooks/video-complete', (req, res) => {
   console.log('Video complete payload:', req.body);
   res.json({ ok:true });
 });
+// === /api/comments : YouTube + Reddit (FB/IG/Nextdoor return empty unless you add actors) ===
+app.post('/api/comments', async (req, res) => {
+  try {
+    const { url, city='', state='' } = req.body || {};
+    if (!url) return res.status(400).json({ ok:false, error:'url required' });
 
+    const host = new URL(url).hostname.replace(/^www\./,'');
+    const apify = client('apify');
+    const items = [];
+
+    // YouTube – native API first
+    if (/youtube\.com|youtu\.be/i.test(host)) {
+      const key = process.env.YOUTUBE_API_KEY;
+      const vid = (url.match(/[?&]v=([^&#]+)/) || [])[1];
+      if (key && vid) {
+        const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
+          params: { part: 'snippet', videoId: vid, maxResults: 80, key }
+        });
+        for (const row of (yt.data.items || [])) {
+          const sn = row.snippet.topLevelComment.snippet;
+          items.push({
+            platform: 'youtube',
+            author: sn.authorDisplayName,
+            text: sn.textDisplay,
+            publishedAt: sn.publishedAt
+          });
+        }
+        return res.json({ ok:true, url, city, state, items, provider:'youtube-api' });
+      }
+    }
+
+    // Reddit via Apify
+    if (/reddit\.com$/i.test(host) && apify) {
+      const run = await apify.post('/v2/acts/apify~reddit-scraper/runs', {
+        startUrls: [{ url }], maxItems: 150, includePostComments: true
+      });
+      const runId = run.data?.data?.id;
+      const wait = ms => new Promise(r => setTimeout(r, ms));
+      let status='RUNNING', datasetId=null, tries=0;
+      while (tries < 20) {
+        const st = await apify.get(`/v2/actor-runs/${runId}`);
+        status    = st.data?.data?.status;
+        datasetId = st.data?.data?.defaultDatasetId;
+        if (status==='SUCCEEDED' && datasetId) break;
+        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
+        await wait(1500); tries++;
+      }
+      if (status==='SUCCEEDED' && datasetId) {
+        const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+        for (const r of (resp.data || [])) {
+          if (Array.isArray(r.comments)) {
+            for (const c of r.comments) items.push({
+              platform: 'reddit',
+              author: c.author,
+              text: c.text,
+              publishedAt: c.createdAt
+            });
+          }
+        }
+      }
+      return res.json({ ok:true, url, city, state, items, provider:'apify-reddit' });
+    }
+
+    // FB/IG/Nextdoor – return empty unless you wire actors/tokens later
+    return res.json({ ok:true, url, city, state, items: [], provider:'none' });
+  } catch (e) {
+    console.error('comments error:', e?.response?.data || e.message);
+    res.status(500).json({ ok:false, error:'comments failed' });
+  }
+});
+
+// === /api/market-report : simple placeholder so your node doesn’t 404 ===
+app.post('/api/market-report', async (req, res) => {
+  const { city='', state='' } = req.body || {};
+  // TODO: generate real PDF later; for now return a placeholder URL
+  return res.json({ ok:true, report_url:`https://example.com/market-report-${encodeURIComponent(city)}-${encodeURIComponent(state)}.pdf` });
+});
+
+// === /api/performance/digest : placeholder stats for daily digest ===
+app.get('/api/performance/digest', (req, res) => {
+  const hours = Number(req.query.hours || 24);
+  // TODO: compute real stats from your DB/logs
+  res.json({
+    ok:true,
+    stats:{
+      windowHours: hours,
+      totalLeads: 0,
+      intentDistribution: { immediate:0, high:0, medium:0, low:0 },
+      sourceBreakdown: { public:0, idx:0 },
+      topSignals:[]
+    }
+  });
+});
 // ---- Global error guard ----
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);

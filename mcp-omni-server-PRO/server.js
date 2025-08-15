@@ -96,75 +96,80 @@ app.get('/routes', (_req, res) => {
 // ---- Scrape a list of URLs (blocking) ----
 app.post('/api/scrape', async (req, res) => {
   try {
-    const apify = client('apify'); // uses APIFY_TOKEN if set
-    const { urls = [] } = req.body || {};
-    // Accept multiple shapes: urls[] OR scrapeUrls[] OR socialUrls[] OR holdUrls[]
-let list = [];
-if (Array.isArray(urls) && urls.length) list = urls;
-else if (Array.isArray(req.body?.scrapeUrls) && req.body.scrapeUrls.length) list = req.body.scrapeUrls;
-else if (Array.isArray(req.body?.socialUrls) && req.body.socialUrls.length) list = req.body.socialUrls;
-else if (Array.isArray(req.body?.holdUrls) && req.body.holdUrls.length) list = req.body.holdUrls;
-else list = [];
+    const apify = client('apify');
 
-// optional: dedupe & sanitize
-list = [...new Set(list.filter(Boolean))];
+    // Normalize input: accept urls[] or scrapeUrls/socialUrls/holdUrls
+    const body = req.body || {};
+    let list = [];
+    if (Array.isArray(body.urls) && body.urls.length) list = body.urls;
+    else if (Array.isArray(body.scrapeUrls) && body.scrapeUrls.length) list = body.scrapeUrls;
+    else if (Array.isArray(body.socialUrls) && body.socialUrls.length) list = body.socialUrls;
+    else if (Array.isArray(body.holdUrls) && body.holdUrls.length) list = body.holdUrls;
 
-if (!list.length) return res.status(400).json({ ok:false, error:'urls[] required' });
+    // Sanitize + dedupe
+    list = [...new Set((list || [])
+      .filter(u => typeof u === 'string' && /^https?:\/\//i.test(u)))];
 
-    const list = Array.isArray(urls) ? urls.filter(Boolean) : [];
-    if (!list.length) return res.status(400).json({ ok: false, error: 'urls[] required' });
+    if (!list.length) {
+      return res.status(400).json({ ok: false, error: 'urls[] required' });
+    }
 
-    // "Hard" hosts (IG/FB) – we’ll pass through with placeholders so your flow keeps geo/url context
-    const hardHosts = ['instagram.com', 'm.facebook.com', 'facebook.com'];
-    const isHard = u => hardHosts.some(h => (u || '').includes(h));
+    // Optional geo context passthrough for scoring
+    const cityMap  = body.urlCityMap  || {};
+    const stateMap = body.urlStateMap || {};
+
+    // Hosts we don't hard-scrape (keep placeholders so n8n routing continues)
+    const hardHosts = ['instagram.com', 'm.facebook.com', 'facebook.com', 'nextdoor.com'];
+    const isHard = (u) => {
+      try {
+        const h = new URL(u).hostname.replace(/^www\./, '');
+        return hardHosts.some(d => h === d || h.endsWith('.' + d));
+      } catch { return false; }
+    };
+
     const hard = list.filter(isHard);
     const easy = list.filter(u => !isHard(u));
 
-    // If Apify is available, use Web Scraper actor and return dataset items
+    let items = [];
+
+    // Prefer Apify full-browser scrape for JS-heavy sites (Redfin/Zillow/etc.)
     if (apify && easy.length) {
       const input = {
-  startUrls: list.map(u => ({ url: u })),
-  maxRequestsPerCrawl: Math.min(list.length, 30),
-  maxConcurrency: 5,
-  useChrome: true,            // ← ensures full Chrome
-  stealth: true,              // ← reduces bot detection
-  proxyConfiguration: { useApifyProxy: true },
-  pageFunction: `
-    async function pageFunction(context) {
-      const { request, log } = context;
-      const title = document.title || '';
-      let text = '';
-      try {
-        text = document.body ? document.body.innerText : '';
-      } catch (e) { log.debug('text-read failed'); }
-      return { url: request.url, title, content: (text || '').slice(0, 20000) };
-    }
-  `,
-  maxRequestRetries: 2,
-  navigationTimeoutSecs: 45
-};
+        startUrls: easy.map(u => ({ url: u })),
+        maxRequestsPerCrawl: Math.min(easy.length, 30),
+        maxConcurrency: 5,
+        useChrome: true,
+        stealth: true,
+        proxyConfiguration: { useApifyProxy: true },
+        pageFunction: `
+          async function pageFunction(context) {
+            const { request, log } = context;
+            const title = document.title || '';
+            let text = '';
+            try { text = document.body ? document.body.innerText : ''; } catch (e) { log.debug('text-read failed'); }
+            return { url: request.url, title, content: (text || '').slice(0, 20000) };
+          }
+        `,
+        maxRequestRetries: 2,
+        navigationTimeoutSecs: 45
+      };
 
-
-      // Start run
       const start = await apify.post('/v2/acts/apify~web-scraper/runs', input);
-      const runId = start.data?.data?.id;
+      const runId = start?.data?.data?.id;
       if (!runId) throw new Error('No Apify run id from /runs');
 
       // Poll for completion
-      const wait = ms => new Promise(r => setTimeout(r, ms));
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
       let status = 'RUNNING', datasetId = null, tries = 0;
       while (tries < 25) {
         const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status    = st.data?.data?.status;
-        datasetId = st.data?.data?.defaultDatasetId;
+        status    = st?.data?.data?.status;
+        datasetId = st?.data?.data?.defaultDatasetId;
         if (status === 'SUCCEEDED' && datasetId) break;
-        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) {
-          throw new Error(`Apify run ${status}`);
-        }
+        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
         await wait(1500); tries++;
       }
 
-      let items = [];
       if (status === 'SUCCEEDED' && datasetId) {
         const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
         const raw = Array.isArray(resp.data) ? resp.data : [];
@@ -173,47 +178,102 @@ if (!list.length) return res.status(400).json({ ok:false, error:'urls[] required
           .map(r => ({ url: r.url, title: r.title || '', content: r.content || '' }))
           .filter(it => it.url && !seen.has(it.url) && seen.add(it.url));
       }
-
-      // Add placeholders for hard sites so flow continues
-      for (const u of hard) items.push({ url: u, title: '', content: '' });
-
-      return res.json({
-        ok: true,
-        items,
-        provider: 'apify|fallback',
-        note: hard.length ? 'Some hosts returned placeholders (IG/FB).' : undefined
-      });
     }
 
-    // ---- Fallback (no APIFY_TOKEN): simple HTTP GET for each easy URL
-    const out = [];
-    for (const u of list) {
-      try {
-        if (isHard(u)) {
-          out.push({ url: u, title: '', content: '' });
-          continue;
+    // Add placeholders for hard hosts so downstream keeps URL/geo context
+    for (const u of hard) items.push({ url: u, title: '', content: '' });
+
+    // Fallback simple GET if no Apify or no items yet
+    if ((!apify || items.length === 0) && easy.length) {
+      for (const u of easy) {
+        try {
+          const r = await axios.get(u, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+          const html = String(r.data || '');
+          const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+          const title = titleMatch ? titleMatch[1] : '';
+          const text = html
+            .replace(/<script[\\s\\S]*?<\\/script>/gi, '')
+            .replace(/<style[\\s\\S]*?<\\/style>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\\s+/g, ' ')
+            .trim();
+          items.push({ url: u, title, content: text.slice(0, 20000) });
+        } catch {
+          items.push({ url: u, title: '', content: '' });
         }
-        const r = await axios.get(u, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-        const html = String(r.data || '');
-        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-        const title = titleMatch ? titleMatch[1] : '';
-        // crude strip of tags
-        const text = html
-          .replace(/<script[\s\S]*?<\/script>/gi,'')
-          .replace(/<style[\s\S]*?<\/style>/gi,'')
-          .replace(/<[^>]+>/g,' ')
-          .replace(/\s+/g,' ')
-          .trim();
-        out.push({ url: u, title, content: text.slice(0, 20000) });
-      } catch (e) {
-        console.error('[scrape] fallback error for', u, e?.response?.status || e.message);
-        out.push({ url: u, title: '', content: '' });
       }
     }
-    return res.json({ ok: true, items: out, provider: 'fallback' });
+
+    // Attach geo maps (helps your scoring when page text is thin)
+    items = items.map(it => ({
+      ...it,
+      city:  cityMap[it.url]  || it.city  || null,
+      state: stateMap[it.url] || it.state || null,
+    }));
+
+    return res.json({ ok: true, items, provider: apify ? 'apify|fallback' : 'fallback' });
   } catch (e) {
     console.error('scrape fatal:', e?.response?.data || e.message);
     return res.status(500).json({ ok: false, error: 'scrape failed' });
+  }
+});
+app.post('/api/comments', async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    if (!url) return res.status(400).json({ ok: false, error: 'url required' });
+
+    const host = new URL(url).hostname.replace(/^www\./,'');
+    const apify = client('apify');
+
+    // YouTube via API (recommended)
+    if ((host.endsWith('youtube.com') || host.endsWith('youtu.be')) && process.env.YOUTUBE_API_KEY) {
+      const videoId = (url.match(/[?&]v=([^&#]+)/) || [])[1] || null;
+      if (videoId) {
+        const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
+          params: { part: 'snippet', videoId, maxResults: 50, key: process.env.YOUTUBE_API_KEY }
+        });
+        const items = (yt.data.items || []).map(c => ({
+          platform: 'youtube',
+          author: c.snippet.topLevelComment.snippet.authorDisplayName,
+          text: c.snippet.topLevelComment.snippet.textDisplay,
+          publishedAt: c.snippet.topLevelComment.snippet.publishedAt
+        }));
+        return res.json({ ok: true, items, provider: 'youtube-api' });
+      }
+    }
+
+    // Reddit via Apify actor (if token present)
+    if (host.endsWith('reddit.com') && apify) {
+      const run = await apify.post('/v2/acts/apify~reddit-scraper/runs', {
+        startUrls: [{ url }], maxItems: 100, includePostComments: true
+      });
+      const runId = run?.data?.data?.id;
+      if (!runId) return res.json({ ok: true, items: [], provider: 'none' });
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
+      let status = 'RUNNING', datasetId = null, tries = 0;
+      while (tries < 20) {
+        const st = await apify.get(`/v2/actor-runs/${runId}`);
+        status    = st?.data?.data?.status;
+        datasetId = st?.data?.data?.defaultDatasetId;
+        if (status === 'SUCCEEDED' && datasetId) break;
+        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) break;
+        await wait(1500); tries++;
+      }
+      if (status === 'SUCCEEDED' && datasetId) {
+        const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+        const raw = Array.isArray(resp.data) ? resp.data : [];
+        const items = raw
+          .filter(r => r?.type === 'comment' || r?.commentText)
+          .map(r => ({ platform: 'reddit', author: r.author || '', text: r.commentText || r.text || '', publishedAt: r.created || null }));
+        return res.json({ ok: true, items, provider: 'apify-reddit' });
+      }
+    }
+
+    // IG/FB/Nextdoor require dedicated actors/cookies → empty by default
+    return res.json({ ok: true, items: [], provider: 'none' });
+  } catch (e) {
+    console.error('comments error:', e?.response?.data || e.message);
+    res.status(500).json({ ok: false, error: 'comments failed' });
   }
 });
 
@@ -353,119 +413,6 @@ ${userPrompt}` }
   } catch (e) {
     console.error('discover fatal:', e?.response?.data || e.message);
     return res.status(200).json({ ok: true, items: [], warning: 'discover failed; returned empty list' });
-  }
-});
-// ---- Comments for a single URL (YouTube + Reddit now; IG/FB/Nextdoor when actors/creds ready) ----
-app.post('/api/comments', async (req, res) => {
-  try {
-    const { url } = req.body || {};
-    if (!url) return res.status(400).json({ ok:false, error:'url required' });
-
-    const host = new URL(url).hostname.replace(/^www\./,'').toLowerCase();
-    const apify = client('apify');
-    const items = [];
-
-    // Helper: poll an Apify run to SUCCEEDED and return dataset items
-    async function pollApifyRun(runId) {
-      const wait = ms => new Promise(r => setTimeout(r, ms));
-      let status = 'RUNNING', datasetId = null, tries = 0;
-      while (tries < 25) {
-        const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status    = st.data?.data?.status;
-        datasetId = st.data?.data?.defaultDatasetId;
-        if (status === 'SUCCEEDED' && datasetId) {
-          const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
-          return Array.isArray(resp.data) ? resp.data : [];
-        }
-        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
-        await wait(1500); tries++;
-      }
-      return [];
-    }
-
-    // YOUTUBE
-    if (host.endsWith('youtube.com') || host.endsWith('youtu.be')) {
-      const key = process.env.YOUTUBE_API_KEY;
-      // Try native API first if you provided a key
-      const videoId =
-        (url.match(/[?&]v=([^&#]+)/) || [])[1] ||
-        (host === 'youtu.be' ? url.split('/').pop().split(/[?&#]/)[0] : null);
-
-      if (key && videoId) {
-        const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
-          params: { part: 'snippet', videoId, maxResults: 100, key }
-        });
-        const arr = yt.data?.items || [];
-        for (const c of arr) {
-          const sn = c?.snippet?.topLevelComment?.snippet;
-          if (!sn) continue;
-          items.push({
-            platform: 'youtube',
-            author: sn.authorDisplayName,
-            text: sn.textDisplay,
-            publishedAt: sn.publishedAt,
-            url
-          });
-        }
-        return res.json({ ok:true, items, provider:'youtube-api' });
-      }
-
-      // Fallback to Apify actor if no YOUTUBE_API_KEY
-      if (apify) {
-        const start = await apify.post('/v2/acts/apify~youtube-comments-scraper/runs', {
-          startUrls: [{ url }], maxComments: 100
-        });
-        const runId = start.data?.data?.id;
-        if (!runId) return res.json({ ok:true, items, provider:'none' });
-
-        const raw = await pollApifyRun(runId);
-        for (const r of raw) {
-          items.push({
-            platform: 'youtube',
-            author: r?.author || r?.authorName || '',
-            text: r?.text || r?.comment || '',
-            publishedAt: r?.publishedAt || '',
-            url
-          });
-        }
-        return res.json({ ok:true, items, provider:'apify' });
-      }
-
-      return res.json({ ok:true, items, provider:'none' });
-    }
-
-    // REDDIT
-    if (host.endsWith('reddit.com') && apify) {
-      const start = await apify.post('/v2/acts/apify~reddit-scraper/runs', {
-        startUrls: [{ url }],
-        maxItems: 200,
-        includePostComments: true
-      });
-      const runId = start.data?.data?.id;
-      if (!runId) return res.json({ ok:true, items, provider:'none' });
-
-      const raw = await pollApifyRun(runId);
-      for (const r of raw) {
-        // Dataset may include both posts and comments
-        if (r?.type === 'comment' || r?.comment) {
-          items.push({
-            platform: 'reddit',
-            author: r?.author || '',
-            text: r?.text || r?.comment || '',
-            publishedAt: r?.created || r?.createdAt || '',
-            url
-          });
-        }
-      }
-      return res.json({ ok:true, items, provider:'apify' });
-    }
-
-    // IG / FB / NEXTDOOR (require specific actors/creds; return empty by default)
-    // You can wire specific Apify actors later and map them here.
-    return res.json({ ok:true, items, provider:'not-configured' });
-  } catch (e) {
-    console.error('comments error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'comments failed' });
   }
 });
 

@@ -199,10 +199,10 @@ app.post('/api/scrape', async (req, res) => {
           const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
           const title = titleMatch ? titleMatch[1] : '';
           const text = html
-            .replace(/<script[\\s\\S]*?<\\/script>/gi, '')
-            .replace(/<style[\\s\\S]*?<\\/style>/gi, '')
+            .replace(/<script[\s\S]*?<\/script>/gi, '')
+            .replace(/<style[\s\S]*?<\/style>/gi, '')
             .replace(/<[^>]+>/g, ' ')
-            .replace(/\\s+/g, ' ')
+            .replace(/\s+/g, ' ')
             .trim();
           items.push({ url: u, title, content: text.slice(0, 20000) });
         } catch {

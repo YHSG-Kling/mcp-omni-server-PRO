@@ -20,6 +20,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type','x-auth-token','Authorization']
 
 }));
+process.on('unhandledRejection', (err) => {
+  console.error('UNHANDLED REJECTION', err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION', err);
+});
+
 
 // ---- Security: shared header ----
 app.use((req, res, next) => {
@@ -215,65 +222,6 @@ app.post('/api/scrape', async (req, res) => {
   } catch (e) {
     console.error('scrape fatal:', e?.response?.data || e.message);
     return res.status(500).json({ ok: false, error: 'scrape failed' });
-  }
-});
-app.post('/api/comments', async (req, res) => {
-  try {
-    const { url } = req.body || {};
-    if (!url) return res.status(400).json({ ok: false, error: 'url required' });
-
-    const host = new URL(url).hostname.replace(/^www\./,'');
-    const apify = client('apify');
-
-    // YouTube via API (recommended)
-    if ((host.endsWith('youtube.com') || host.endsWith('youtu.be')) && process.env.YOUTUBE_API_KEY) {
-      const videoId = (url.match(/[?&]v=([^&#]+)/) || [])[1] || null;
-      if (videoId) {
-        const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
-          params: { part: 'snippet', videoId, maxResults: 50, key: process.env.YOUTUBE_API_KEY }
-        });
-        const items = (yt.data.items || []).map(c => ({
-          platform: 'youtube',
-          author: c.snippet.topLevelComment.snippet.authorDisplayName,
-          text: c.snippet.topLevelComment.snippet.textDisplay,
-          publishedAt: c.snippet.topLevelComment.snippet.publishedAt
-        }));
-        return res.json({ ok: true, items, provider: 'youtube-api' });
-      }
-    }
-
-    // Reddit via Apify actor (if token present)
-    if (host.endsWith('reddit.com') && apify) {
-      const run = await apify.post('/v2/acts/apify~reddit-scraper/runs', {
-        startUrls: [{ url }], maxItems: 100, includePostComments: true
-      });
-      const runId = run?.data?.data?.id;
-      if (!runId) return res.json({ ok: true, items: [], provider: 'none' });
-      const wait = (ms) => new Promise(r => setTimeout(r, ms));
-      let status = 'RUNNING', datasetId = null, tries = 0;
-      while (tries < 20) {
-        const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status    = st?.data?.data?.status;
-        datasetId = st?.data?.data?.defaultDatasetId;
-        if (status === 'SUCCEEDED' && datasetId) break;
-        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) break;
-        await wait(1500); tries++;
-      }
-      if (status === 'SUCCEEDED' && datasetId) {
-        const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
-        const raw = Array.isArray(resp.data) ? resp.data : [];
-        const items = raw
-          .filter(r => r?.type === 'comment' || r?.commentText)
-          .map(r => ({ platform: 'reddit', author: r.author || '', text: r.commentText || r.text || '', publishedAt: r.created || null }));
-        return res.json({ ok: true, items, provider: 'apify-reddit' });
-      }
-    }
-
-    // IG/FB/Nextdoor require dedicated actors/cookies → empty by default
-    return res.json({ ok: true, items: [], provider: 'none' });
-  } catch (e) {
-    console.error('comments error:', e?.response?.data || e.message);
-    res.status(500).json({ ok: false, error: 'comments failed' });
   }
 });
 

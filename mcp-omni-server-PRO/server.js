@@ -17,7 +17,8 @@ app.use(express.json({ limit: '4mb' }));
 app.use(cors({
   origin: (origin, cb) => cb(null, true),
   methods: ['GET','POST'],
-  allowedHeaders: ['Content-Type','x-auth-token']
+  allowedHeaders: ['Content-Type','x-auth-token','Authorization']
+
 }));
 
 // ---- Security: shared header ----
@@ -160,56 +161,6 @@ app.post('/api/scrape', async (req, res) => {
         provider: 'apify|fallback',
         note: hard.length ? 'Some hosts returned placeholders (IG/FB).' : undefined
       });
-      app.post('/api/comments', async (req, res) => {
-  try {
-    const { url } = req.body || {};
-    if (!url) return res.status(400).json({ ok:false, error:'url required' });
-
-    const host = new URL(url).hostname.replace(/^www\./,'');
-    const apify = client('apify');
-
-    // YouTube (native API if YOUTUBE_API_KEY set)
-    if (host.endsWith('youtube.com') || host.endsWith('youtu.be')) {
-      const key = process.env.YOUTUBE_API_KEY;
-      const videoId = (url.match(/[?&]v=([^&#]+)/) || [])[1];
-      if (!videoId && !apify) return res.json({ items: [] });
-
-      if (key && videoId) {
-        const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
-          params: { part: 'snippet', videoId, maxResults: 50, key }
-        });
-        const items = (yt.data.items || []).map(c => ({
-          platform: 'youtube',
-          author: c.snippet.topLevelComment.snippet.authorDisplayName,
-          text: c.snippet.topLevelComment.snippet.textDisplay,
-          publishedAt: c.snippet.topLevelComment.snippet.publishedAt
-        }));
-        return res.json({ items, provider: 'youtube-api' });
-      }
-
-      if (apify) {
-        const run = await apify.post('/v2/acts/apify~youtube-comments-scraper/runs', {
-          startUrls: [{ url }], maxComments: 100
-        });
-        // …poll & fetch dataset like your other Apify flows…
-      }
-    }
-
-    // Reddit (simple HTML scrape via Apify if no creds)
-    if (host.endsWith('reddit.com') && apify) {
-      const run = await apify.post('/v2/acts/apify~reddit-scraper/runs', {
-        startUrls: [{ url }], maxItems: 100, includePostComments: true
-      });
-      // …poll & fetch dataset…
-    }
-
-    // FB/IG/Nextdoor – require appropriate actors/tokens; return empty if not configured
-    return res.json({ items: [], provider: 'none' });
-  } catch (e) {
-    console.error('comments error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'comments failed' });
-  }
-});
     }
 
     // ---- Fallback (no APIFY_TOKEN): simple HTTP GET for each easy URL
@@ -382,6 +333,119 @@ ${userPrompt}` }
     return res.status(200).json({ ok: true, items: [], warning: 'discover failed; returned empty list' });
   }
 });
+// ---- Comments for a single URL (YouTube + Reddit now; IG/FB/Nextdoor when actors/creds ready) ----
+app.post('/api/comments', async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    if (!url) return res.status(400).json({ ok:false, error:'url required' });
+
+    const host = new URL(url).hostname.replace(/^www\./,'').toLowerCase();
+    const apify = client('apify');
+    const items = [];
+
+    // Helper: poll an Apify run to SUCCEEDED and return dataset items
+    async function pollApifyRun(runId) {
+      const wait = ms => new Promise(r => setTimeout(r, ms));
+      let status = 'RUNNING', datasetId = null, tries = 0;
+      while (tries < 25) {
+        const st = await apify.get(`/v2/actor-runs/${runId}`);
+        status    = st.data?.data?.status;
+        datasetId = st.data?.data?.defaultDatasetId;
+        if (status === 'SUCCEEDED' && datasetId) {
+          const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+          return Array.isArray(resp.data) ? resp.data : [];
+        }
+        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
+        await wait(1500); tries++;
+      }
+      return [];
+    }
+
+    // YOUTUBE
+    if (host.endsWith('youtube.com') || host.endsWith('youtu.be')) {
+      const key = process.env.YOUTUBE_API_KEY;
+      // Try native API first if you provided a key
+      const videoId =
+        (url.match(/[?&]v=([^&#]+)/) || [])[1] ||
+        (host === 'youtu.be' ? url.split('/').pop().split(/[?&#]/)[0] : null);
+
+      if (key && videoId) {
+        const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
+          params: { part: 'snippet', videoId, maxResults: 100, key }
+        });
+        const arr = yt.data?.items || [];
+        for (const c of arr) {
+          const sn = c?.snippet?.topLevelComment?.snippet;
+          if (!sn) continue;
+          items.push({
+            platform: 'youtube',
+            author: sn.authorDisplayName,
+            text: sn.textDisplay,
+            publishedAt: sn.publishedAt,
+            url
+          });
+        }
+        return res.json({ ok:true, items, provider:'youtube-api' });
+      }
+
+      // Fallback to Apify actor if no YOUTUBE_API_KEY
+      if (apify) {
+        const start = await apify.post('/v2/acts/apify~youtube-comments-scraper/runs', {
+          startUrls: [{ url }], maxComments: 100
+        });
+        const runId = start.data?.data?.id;
+        if (!runId) return res.json({ ok:true, items, provider:'none' });
+
+        const raw = await pollApifyRun(runId);
+        for (const r of raw) {
+          items.push({
+            platform: 'youtube',
+            author: r?.author || r?.authorName || '',
+            text: r?.text || r?.comment || '',
+            publishedAt: r?.publishedAt || '',
+            url
+          });
+        }
+        return res.json({ ok:true, items, provider:'apify' });
+      }
+
+      return res.json({ ok:true, items, provider:'none' });
+    }
+
+    // REDDIT
+    if (host.endsWith('reddit.com') && apify) {
+      const start = await apify.post('/v2/acts/apify~reddit-scraper/runs', {
+        startUrls: [{ url }],
+        maxItems: 200,
+        includePostComments: true
+      });
+      const runId = start.data?.data?.id;
+      if (!runId) return res.json({ ok:true, items, provider:'none' });
+
+      const raw = await pollApifyRun(runId);
+      for (const r of raw) {
+        // Dataset may include both posts and comments
+        if (r?.type === 'comment' || r?.comment) {
+          items.push({
+            platform: 'reddit',
+            author: r?.author || '',
+            text: r?.text || r?.comment || '',
+            publishedAt: r?.created || r?.createdAt || '',
+            url
+          });
+        }
+      }
+      return res.json({ ok:true, items, provider:'apify' });
+    }
+
+    // IG / FB / NEXTDOOR (require specific actors/creds; return empty by default)
+    // You can wire specific Apify actors later and map them here.
+    return res.json({ ok:true, items, provider:'not-configured' });
+  } catch (e) {
+    console.error('comments error:', e?.response?.data || e.message);
+    res.status(500).json({ ok:false, error:'comments failed' });
+  }
+});
 
 
 // ---- 3) Fuse + Score (relocation/PCS + geo + safe) ----
@@ -396,6 +460,9 @@ app.post('/api/fuse-score', (req, res) => {
       'relocating for work','job transfer','moving for work','new role in',
       'accepted an offer in','pcs orders','permanent change of station','reporting to base'
     ];
+    const SELLER = [ 'sell my house','home sell','list my home','listing agent','fsbo','preforeclosure' ];
+    const MOVERS = [ 'moving company','moving soon','relocating','job transfer','pcs orders' ];
+
     const SENSITIVE = [
       'pregnant','expecting','new baby','newborn','engaged','fiancé','fiance','getting married'
     ];
@@ -420,6 +487,12 @@ app.post('/api/fuse-score', (req, res) => {
       if (txt.includes('cash buyer')) base += 4;
       if (txt.includes('urgent') || txt.includes('asap')) base += 3;
       if (txt.includes('moving') || txt.includes('relocating')) base += 2;
+      if (any(txt, SELLER)) {base += 3; // strong seller intent
+  r.signals = Array.from(new Set([...(r.signals || []), 'seller-intent']));
+}
+if (any(txt, MOVERS)) {base += 2; // “in motion”
+  r.signals = Array.from(new Set([...(r.signals || []), 'mover']));
+}
 
       if (any(txt, ALLOWED)) {
         base += 2;

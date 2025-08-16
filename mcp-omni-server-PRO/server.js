@@ -639,6 +639,79 @@ app.post('/api/comments', async (req, res) => {
       }
       return res.json({ ok:true, url, city, state, items, provider:'apify-reddit' });
     }
+// Instagram via Apify (requires IG_SESSION_ID cookie)
+if (/instagram\.com$/i.test(host)) {
+  if (!apify) return res.json({ ok:true, url, city, state, items: [], provider:'none' });
+
+  if (!process.env.IG_SESSION_ID) {
+    // Graceful fallback if you haven't provided a cookie yet
+    return res.json({ ok:true, url, city, state, items: [], provider:'instagram-unconfigured' });
+  }
+
+  try {
+    // Allow overriding the actor; default to an IG comments-capable actor
+    const IG_ACTOR = process.env.IG_ACTOR || 'apify~instagram-scraper';
+
+    // NOTE: different IG actors accept slightly different inputs; this one is broadly compatible:
+    const run = await apify.post(`/v2/acts/${IG_ACTOR}/runs`, {
+      directUrls: [url],         // scrape this specific post/reel
+      includeComments: true,     // ask for comments
+      maxItems: 120,             // cap
+      proxyConfiguration: { useApifyProxy: true },
+      loginCookies: [
+        { name: 'sessionid', value: process.env.IG_SESSION_ID, domain: '.instagram.com', path: '/' }
+      ]
+    }, {
+      // Keep resource usage low to avoid plan limits
+      params: { memoryMbytes: 512, timeoutSecs: 120 }
+    });
+
+    const runId = run?.data?.data?.id;
+    if (!runId) return res.json({ ok:true, url, city, state, items: [], provider: 'apify-ig' });
+
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    let status = 'RUNNING', datasetId = null, tries = 0;
+    while (tries < 20) {
+      const st = await apify.get(`/v2/actor-runs/${runId}`);
+      status    = st?.data?.data?.status;
+      datasetId = st?.data?.data?.defaultDatasetId;
+      if (status === 'SUCCEEDED' && datasetId) break;
+      if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) break;
+      await wait(1500); tries++;
+    }
+
+    const items = [];
+    if (status === 'SUCCEEDED' && datasetId) {
+      const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+      for (const row of (resp.data || [])) {
+        // Most IG actors return a post object with a comments array or comment entries
+        if (Array.isArray(row.comments)) {
+          for (const c of row.comments) {
+            items.push({
+              platform: 'instagram',
+              author: c.username || c.ownerUsername || '',
+              text: c.text || c.content || '',
+              publishedAt: c.timestamp || c.takenAt || null
+            });
+          }
+        } else if (row.type === 'comment' || row.comment) {
+          items.push({
+            platform: 'instagram',
+            author: row.username || '',
+            text: row.comment || '',
+            publishedAt: row.timestamp || null
+          });
+        }
+      }
+    }
+
+    return res.json({ ok:true, url, city, state, items, provider: 'apify-ig' });
+  } catch (e) {
+    console.error('instagram comments error:', e?.response?.data || e.message);
+    // Don’t break the run; return an empty set
+    return res.json({ ok:true, url, city, state, items: [], provider:'apify-ig-error' });
+  }
+}
 
     // FB/IG/Nextdoor – return empty unless you wire actors/tokens later
     return res.json({ ok:true, url, city, state, items: [], provider:'none' });

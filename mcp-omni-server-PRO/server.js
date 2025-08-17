@@ -17,9 +17,16 @@ app.use(express.json({ limit: '4mb' }));
 app.use(cors({
   origin: (origin, cb) => cb(null, true),
   methods: ['GET','POST'],
-  allowedHeaders: ['Content-Type','x-auth-token','Authorization']
-
+  allowedHeaders: [
+    'Content-Type',
+    'x-auth-token',
+    'Authorization',
+    'x-ig-sessionid',   // already added for IG
+    'x-fb-cookie',      // NEW: Facebook
+    'x-nd-cookie'       // NEW: Nextdoor
+  ]
 }));
+
 process.on('unhandledRejection', (err) => {
   console.error('UNHANDLED REJECTION', err);
 });
@@ -577,17 +584,16 @@ app.post('/webhooks/video-complete', (req, res) => {
   console.log('Video complete payload:', req.body);
   res.json({ ok:true });
 });
-// === /api/comments : YouTube + Reddit (FB/IG/Nextdoor return empty unless you add actors) ===
 app.post('/api/comments', async (req, res) => {
   try {
-    const { url, city='', state='' } = req.body || {};
-    if (!url) return res.status(400).json({ ok:false, error:'url required' });
+    const { url, city = '', state = '' } = req.body || {};
+    if (!url) return res.status(400).json({ ok: false, error: 'url required' });
 
-    const host = new URL(url).hostname.replace(/^www\./,'');
+    const host = new URL(url).hostname.replace(/^www\./, '');
     const apify = client('apify');
     const items = [];
 
-    // YouTube – native API first
+    // ---------- YOUTUBE (official API) ----------
     if (/youtube\.com|youtu\.be/i.test(host)) {
       const key = process.env.YOUTUBE_API_KEY;
       const vid = (url.match(/[?&]v=([^&#]+)/) || [])[1];
@@ -604,27 +610,28 @@ app.post('/api/comments', async (req, res) => {
             publishedAt: sn.publishedAt
           });
         }
-        return res.json({ ok:true, url, city, state, items, provider:'youtube-api' });
+        return res.json({ ok: true, url, city, state, items, provider: 'youtube-api' });
       }
+      return res.json({ ok: true, url, city, state, items: [], provider: 'youtube-api', note: 'missing YOUTUBE_API_KEY or videoId' });
     }
 
-    // Reddit via Apify
+    // ---------- REDDIT (Apify) ----------
     if (/reddit\.com$/i.test(host) && apify) {
       const run = await apify.post('/v2/acts/apify~reddit-scraper/runs', {
         startUrls: [{ url }], maxItems: 150, includePostComments: true
       });
       const runId = run.data?.data?.id;
-      const wait = ms => new Promise(r => setTimeout(r, ms));
-      let status='RUNNING', datasetId=null, tries=0;
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
+      let status = 'RUNNING', datasetId = null, tries = 0;
       while (tries < 20) {
         const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status    = st.data?.data?.status;
+        status = st.data?.data?.status;
         datasetId = st.data?.data?.defaultDatasetId;
-        if (status==='SUCCEEDED' && datasetId) break;
-        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
+        if (status === 'SUCCEEDED' && datasetId) break;
+        if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
         await wait(1500); tries++;
       }
-      if (status==='SUCCEEDED' && datasetId) {
+      if (status === 'SUCCEEDED' && datasetId) {
         const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
         for (const r of (resp.data || [])) {
           if (Array.isArray(r.comments)) {
@@ -637,87 +644,133 @@ app.post('/api/comments', async (req, res) => {
           }
         }
       }
-      return res.json({ ok:true, url, city, state, items, provider:'apify-reddit' });
-    }
-// Instagram via Apify (requires IG_SESSION_ID cookie)
-if (/instagram\.com$/i.test(host)) {
-  if (!apify) return res.json({ ok:true, url, city, state, items: [], provider:'none' });
-
-  if (!process.env.IG_SESSION_ID) {
-    // Graceful fallback if you haven't provided a cookie yet
-    return res.json({ ok:true, url, city, state, items: [], provider:'instagram-unconfigured' });
-  }
-
-  try {
-    // Allow overriding the actor; default to an IG comments-capable actor
-    const IG_ACTOR = process.env.IG_ACTOR || 'apify~instagram-scraper';
-
-    // NOTE: different IG actors accept slightly different inputs; this one is broadly compatible:
-    const run = await apify.post(`/v2/acts/${IG_ACTOR}/runs`, {
-      directUrls: [url],         // scrape this specific post/reel
-      includeComments: true,     // ask for comments
-      maxItems: 120,             // cap
-      proxyConfiguration: { useApifyProxy: true },
-      loginCookies: [
-        { name: 'sessionid', value: process.env.IG_SESSION_ID, domain: '.instagram.com', path: '/' }
-      ]
-    }, {
-      // Keep resource usage low to avoid plan limits
-      params: { memoryMbytes: 512, timeoutSecs: 120 }
-    });
-
-    const runId = run?.data?.data?.id;
-    if (!runId) return res.json({ ok:true, url, city, state, items: [], provider: 'apify-ig' });
-
-    const wait = (ms) => new Promise(r => setTimeout(r, ms));
-    let status = 'RUNNING', datasetId = null, tries = 0;
-    while (tries < 20) {
-      const st = await apify.get(`/v2/actor-runs/${runId}`);
-      status    = st?.data?.data?.status;
-      datasetId = st?.data?.data?.defaultDatasetId;
-      if (status === 'SUCCEEDED' && datasetId) break;
-      if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) break;
-      await wait(1500); tries++;
+      return res.json({ ok: true, url, city, state, items, provider: 'apify-reddit' });
     }
 
-    const items = [];
-    if (status === 'SUCCEEDED' && datasetId) {
-      const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
-      for (const row of (resp.data || [])) {
-        // Most IG actors return a post object with a comments array or comment entries
-        if (Array.isArray(row.comments)) {
-          for (const c of row.comments) {
-            items.push({
-              platform: 'instagram',
-              author: c.username || c.ownerUsername || '',
-              text: c.text || c.content || '',
-              publishedAt: c.timestamp || c.takenAt || null
-            });
-          }
-        } else if (row.type === 'comment' || row.comment) {
+    // ---------- INSTAGRAM (Apify + sessionid) ----------
+    if (/instagram\.com$/i.test(host) && apify) {
+      const session = req.get('x-ig-sessionid') || process.env.IG_SESSIONID;
+      if (!session) {
+        return res.json({ ok: true, url, city, state, items: [], provider: 'apify-instagram', note: 'missing IG_SESSIONID/x-ig-sessionid' });
+      }
+      const ACTOR_IG = process.env.IG_ACTOR || 'epctex~instagram-comments-scraper'; // override via env if needed
+      const run = await apify.post(`/v2/acts/${ACTOR_IG}/runs`, {
+        directUrls: [url],
+        sessionid: session,
+        maxItems: 150,
+        includeReplies: true
+      });
+      const runId = run?.data?.data?.id;
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
+      let status = 'RUNNING', datasetId = null, tries = 0;
+      while (tries < 20) {
+        const st = await apify.get(`/v2/actor-runs/${runId}`);
+        status = st?.data?.data?.status;
+        datasetId = st?.data?.data?.defaultDatasetId;
+        if (status === 'SUCCEEDED' && datasetId) break;
+        if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
+        await wait(1500); tries++;
+      }
+      if (status === 'SUCCEEDED' && datasetId) {
+        const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+        const raw = Array.isArray(resp.data) ? resp.data : [];
+        for (const r of raw) {
           items.push({
             platform: 'instagram',
-            author: row.username || '',
-            text: row.comment || '',
-            publishedAt: row.timestamp || null
+            author: r.ownerUsername || r.username || '',
+            text: r.text || r.caption || '',
+            publishedAt: r.timestamp || r.publishTime || null
           });
         }
       }
+      return res.json({ ok: true, url, city, state, items, provider: 'apify-instagram' });
     }
 
-    return res.json({ ok:true, url, city, state, items, provider: 'apify-ig' });
-  } catch (e) {
-    console.error('instagram comments error:', e?.response?.data || e.message);
-    // Don’t break the run; return an empty set
-    return res.json({ ok:true, url, city, state, items: [], provider:'apify-ig-error' });
-  }
-}
+    // ---------- FACEBOOK (Apify + logged-in cookie) ----------
+    if (/facebook\.com$|m\.facebook\.com$/i.test(host) && apify) {
+      const cookie = req.get('x-fb-cookie') || process.env.FB_COOKIE; // raw "Cookie" header string from your browser
+      if (!cookie) {
+        return res.json({ ok: true, url, city, state, items: [], provider: 'apify-facebook', note: 'missing FB_COOKIE/x-fb-cookie' });
+      }
+      const ACTOR_FB = process.env.FB_ACTOR || 'epctex~facebook-comments-scraper'; // set to your preferred actor
+      const run = await apify.post(`/v2/acts/${ACTOR_FB}/runs`, {
+        directUrls: [url],
+        cookie,              // most FB actors accept a raw Cookie header string
+        maxItems: 150,
+        includeReplies: true,
+        // proxyConfiguration may be required by some actors/plans:
+        // proxyConfiguration: { useApifyProxy: true, groups: ['RESIDENTIAL'] }
+      });
+      const runId = run?.data?.data?.id;
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
+      let status = 'RUNNING', datasetId = null, tries = 0;
+      while (tries < 20) {
+        const st = await apify.get(`/v2/actor-runs/${runId}`);
+        status = st?.data?.data?.status;
+        datasetId = st?.data?.data?.defaultDatasetId;
+        if (status === 'SUCCEEDED' && datasetId) break;
+        if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
+        await wait(1500); tries++;
+      }
+      if (status === 'SUCCEEDED' && datasetId) {
+        const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+        const raw = Array.isArray(resp.data) ? resp.data : [];
+        for (const r of raw) {
+          items.push({
+            platform: 'facebook',
+            author: r.authorName || r.username || '',
+            text: r.text || r.comment || r.message || '',
+            publishedAt: r.publishedTime || r.timestamp || null
+          });
+        }
+      }
+      return res.json({ ok: true, url, city, state, items, provider: 'apify-facebook' });
+    }
 
-    // FB/IG/Nextdoor – return empty unless you wire actors/tokens later
-    return res.json({ ok:true, url, city, state, items: [], provider:'none' });
+    // ---------- NEXTDOOR (Apify + logged-in cookie) ----------
+    if (/nextdoor\.com$/i.test(host) && apify) {
+      const cookie = req.get('x-nd-cookie') || process.env.ND_COOKIE; // raw Cookie header string
+      if (!cookie) {
+        return res.json({ ok: true, url, city, state, items: [], provider: 'apify-nextdoor', note: 'missing ND_COOKIE/x-nd-cookie' });
+      }
+      const ACTOR_ND = process.env.ND_ACTOR || 'epctex~nextdoor-comments-scraper'; // set to your actor
+      const run = await apify.post(`/v2/acts/${ACTOR_ND}/runs`, {
+        directUrls: [url],
+        cookie,
+        maxItems: 150,
+        includeReplies: true
+      });
+      const runId = run?.data?.data?.id;
+      const wait = (ms) => new Promise(r => setTimeout(r, ms));
+      let status = 'RUNNING', datasetId = null, tries = 0;
+      while (tries < 20) {
+        const st = await apify.get(`/v2/actor-runs/${runId}`);
+        status = st?.data?.data?.status;
+        datasetId = st?.data?.data?.defaultDatasetId;
+        if (status === 'SUCCEEDED' && datasetId) break;
+        if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
+        await wait(1500); tries++;
+      }
+      if (status === 'SUCCEEDED' && datasetId) {
+        const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+        const raw = Array.isArray(resp.data) ? resp.data : [];
+        for (const r of raw) {
+          items.push({
+            platform: 'nextdoor',
+            author: r.authorName || r.username || '',
+            text: r.text || r.comment || r.message || '',
+            publishedAt: r.publishedTime || r.timestamp || null
+          });
+        }
+      }
+      return res.json({ ok: true, url, city, state, items, provider: 'apify-nextdoor' });
+    }
+
+    // Fallback: unsupported host (no-op)
+    return res.json({ ok: true, url, city, state, items: [], provider: 'none' });
   } catch (e) {
     console.error('comments error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'comments failed' });
+    res.status(500).json({ ok: false, error: 'comments failed' });
   }
 });
 

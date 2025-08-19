@@ -661,44 +661,236 @@ app.post('/api/comments', async (req, res) => {
       return res.json({ ok: true, url, city, state, items, provider: 'apify-reddit' });
     }
 
-    // ---------- INSTAGRAM (Apify + sessionid) ----------
+    // REPLACE your existing Instagram section in /api/comments with this:
+app.post('/api/comments', async (req, res) => {
+  try {
+    const { url, city = '', state = '' } = req.body || {};
+    if (!url) return res.status(400).json({ ok: false, error: 'url required' });
+
+    let host;
+    try { 
+      host = new URL(url).hostname.replace(/^www\./, ''); 
+    } catch { 
+      return res.status(400).json({ ok: false, error: 'invalid url' }); 
+    }
+
+    const apify = client('apify');
+    const items = [];
+
+    // === FIXED INSTAGRAM HANDLING ===
     if (/instagram\.com$/i.test(host) && apify) {
-      const session = req.get('x-ig-sessionid') || process.env.IG_SESSIONID;
+      console.log('Processing Instagram URL:', url);
+      
+      // Try multiple sources for session ID (in priority order)
+      const sessionSources = [
+        req.get('x-ig-sessionid'),           // From n8n header
+        process.env.IG_SESSIONID,           // From environment
+        process.env.INSTAGRAM_SESSION_ID,   // Alternative env name
+        req.body.igSessionId,               // From request body
+        req.query.sessionid                 // From query params
+      ];
+      
+      const session = sessionSources.find(s => s && s.length > 10);
+      
       if (!session) {
-        return res.json({ ok: true, url, city, state, items: [], provider: 'apify-instagram', note: 'missing IG_SESSIONID/x-ig-sessionid' });
+        console.error('Instagram session ID missing from all sources:', {
+          header: !!req.get('x-ig-sessionid'),
+          env_ig: !!process.env.IG_SESSIONID,
+          env_instagram: !!process.env.INSTAGRAM_SESSION_ID,
+          body: !!req.body.igSessionId,
+          query: !!req.query.sessionid
+        });
+        
+        return res.json({ 
+          ok: true, 
+          url, 
+          city, 
+          state, 
+          items: [], 
+          provider: 'instagram-no-session',
+          error: 'Instagram session ID not found in any source'
+        });
       }
-      const ACTOR_IG = process.env.IG_ACTOR || 'epctex~instagram-comments-scraper';
-      const run = await apify.post(`/v2/acts/${ACTOR_IG}/runs?memory=${MEM}&timeout=${TMO}`, {
-        directUrls: [url],
-        sessionid: session,
-        maxItems: 150,
-        includeReplies: true
-      });
-      const runId = run?.data?.data?.id;
-      const wait = (ms) => new Promise(r => setTimeout(r, ms));
-      let status = 'RUNNING', datasetId = null, tries = 0;
-      while (tries < 20) {
-        const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status    = st?.data?.data?.status;
-        datasetId = st?.data?.data?.defaultDatasetId;
-        if (status === 'SUCCEEDED' && datasetId) break;
-        if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
-        await wait(1500); tries++;
-      }
-      if (status === 'SUCCEEDED' && datasetId) {
-        const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
-        const raw = Array.isArray(resp.data) ? resp.data : [];
-        for (const r of raw) {
-          items.push({
-            platform: 'instagram',
-            author: r.ownerUsername || r.username || '',
-            text: r.text || r.caption || '',
-            publishedAt: r.timestamp || r.publishTime || null
-          });
+
+      console.log('Using Instagram session ID:', session.substring(0, 10) + '...');
+
+      // Multiple actor options (try different ones if available)
+      const actorOptions = [
+        process.env.IG_ACTOR || 'epctex~instagram-comments-scraper',
+        'apify~instagram-scraper',
+        'dSCt5lzqn2TfzOGGj',  // Another popular IG scraper
+        'instagram-post-scraper'
+      ];
+
+      let scrapeResult = null;
+      
+      for (const actor of actorOptions) {
+        try {
+          console.log('Trying Instagram actor:', actor);
+          
+          const runConfig = {
+            directUrls: [url],
+            sessionid: session,
+            maxItems: 150,
+            includeReplies: true,
+            // Enhanced configuration
+            includePostData: true,
+            includeComments: true,
+            maxCommentsPerPost: 100,
+            maxRepliesPerComment: 5,
+            // Performance settings
+            proxyConfiguration: { useApifyProxy: true },
+            maxConcurrency: 1,
+            maxRequestRetries: 3
+          };
+
+          console.log('Instagram run config:', JSON.stringify(runConfig, null, 2));
+
+          const run = await apify.post(`/v2/acts/${actor}/runs?memory=1024&timeout=300`, runConfig);
+          const runId = run?.data?.data?.id;
+          
+          if (!runId) {
+            console.error('No run ID from Instagram actor:', actor);
+            continue;
+          }
+
+          console.log('Instagram run started:', runId);
+
+          // Wait for completion with better error handling
+          const wait = (ms) => new Promise(r => setTimeout(r, ms));
+          let status = 'RUNNING', datasetId = null, tries = 0;
+          const maxTries = 30; // Increased timeout for IG
+          
+          while (tries < maxTries) {
+            try {
+              const st = await apify.get(`/v2/actor-runs/${runId}`);
+              status = st?.data?.data?.status;
+              datasetId = st?.data?.data?.defaultDatasetId;
+              
+              console.log(`Instagram run ${runId} status: ${status} (try ${tries + 1}/${maxTries})`);
+              
+              if (status === 'SUCCEEDED' && datasetId) {
+                console.log('Instagram run succeeded, dataset:', datasetId);
+                break;
+              }
+              
+              if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) {
+                console.error('Instagram run failed:', status);
+                break;
+              }
+              
+              await wait(3000); // Wait 3 seconds between checks
+              tries++;
+            } catch (statusError) {
+              console.error('Error checking Instagram run status:', statusError.message);
+              tries++;
+              await wait(3000);
+            }
+          }
+          
+          if (status === 'SUCCEEDED' && datasetId) {
+            try {
+              const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+              const raw = Array.isArray(resp.data) ? resp.data : [];
+              
+              console.log('Instagram data received:', raw.length, 'items');
+              
+              for (const r of raw) {
+                // Handle different data structures from different actors
+                let comment = null;
+                
+                if (r.text || r.caption) {
+                  // Direct comment/caption
+                  comment = {
+                    platform: 'instagram',
+                    author: r.ownerUsername || r.username || r.author || 'unknown',
+                    text: r.text || r.caption || '',
+                    publishedAt: r.timestamp || r.publishTime || r.createdAt || new Date().toISOString(),
+                    likeCount: r.likesCount || r.likes || 0,
+                    url: r.url || url,
+                    postId: r.id || r.postId
+                  };
+                } else if (r.comments && Array.isArray(r.comments)) {
+                  // Comments array
+                  for (const c of r.comments) {
+                    items.push({
+                      platform: 'instagram',
+                      author: c.username || c.author || 'unknown',
+                      text: c.text || c.comment || '',
+                      publishedAt: c.timestamp || c.createdAt || new Date().toISOString(),
+                      likeCount: c.likesCount || c.likes || 0,
+                      url: url,
+                      postId: r.id || r.postId
+                    });
+                  }
+                  continue; // Skip adding the parent item
+                }
+                
+                if (comment && comment.text && comment.text.length > 10) {
+                  items.push(comment);
+                }
+              }
+              
+              scrapeResult = { success: true, actor, items: items.length };
+              break; // Success, exit actor loop
+              
+            } catch (dataError) {
+              console.error('Error processing Instagram dataset:', dataError.message);
+              continue; // Try next actor
+            }
+          } else {
+            console.error('Instagram run did not succeed:', { status, datasetId, tries });
+            continue; // Try next actor
+          }
+          
+        } catch (actorError) {
+          console.error('Instagram actor error:', actor, actorError.message);
+          continue; // Try next actor
         }
       }
-      return res.json({ ok: true, url, city, state, items, provider: 'apify-instagram' });
+      
+      if (!scrapeResult) {
+        console.error('All Instagram actors failed');
+        return res.json({ 
+          ok: true, 
+          url, 
+          city, 
+          state, 
+          items: [], 
+          provider: 'instagram-all-actors-failed',
+          error: 'All Instagram scraping actors failed',
+          actorsTried: actorOptions
+        });
+      }
+      
+      console.log('Instagram scraping completed:', scrapeResult);
     }
+
+    // Return results
+    return res.json({ 
+      ok: true, 
+      url, 
+      city, 
+      state, 
+      items, 
+      provider: items.length > 0 ? 'instagram-success' : 'instagram-no-comments',
+      count: items.length,
+      sessionUsed: !!session
+    });
+
+  } catch (e) {
+    console.error('Instagram comments error:', e);
+    return res.json({ 
+      ok: true, 
+      url: req.body?.url || '', 
+      city: req.body?.city || '', 
+      state: req.body?.state || '',
+      items: [], 
+      provider: 'instagram-error',
+      error: e.message
+    });
+  }
+});
 
     // ---------- FACEBOOK (Apify + logged-in cookie) ----------
     if (/(^|\.)facebook\.com$/i.test(host) && apify) {

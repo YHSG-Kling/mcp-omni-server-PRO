@@ -589,21 +589,26 @@ app.post('/api/comments', async (req, res) => {
     const { url, city = '', state = '' } = req.body || {};
     if (!url) return res.status(400).json({ ok: false, error: 'url required' });
 
-    const host = new URL(url).hostname.replace(/^www\./, '');
+    let host;
+    try { host = new URL(url).hostname.replace(/^www\./, ''); }
+    catch { return res.status(400).json({ ok:false, error:'invalid url' }); }
+
     const apify = client('apify');
     const items = [];
+
+    // Apify resource limits (overridable via env)
+    const MEM = encodeURIComponent(process.env.APIFY_MEMORY || 512);
+    const TMO = encodeURIComponent(process.env.APIFY_TIMEOUT_SEC || 120);
 
     // ---------- YOUTUBE (official API) ----------
     if (/youtube\.com|youtu\.be/i.test(host)) {
       const key = process.env.YOUTUBE_API_KEY;
       let vid = (url.match(/[?&]v=([^&#]+)/) || [])[1];
-if (!vid) {
-  const u = new URL(url);
-  // youtu.be/<id>
-  if (u.hostname.includes('youtu.be')) vid = u.pathname.split('/').filter(Boolean)[0] || '';
-  // shorts/<id>
-  if (!vid && u.pathname.startsWith('/shorts/')) vid = u.pathname.split('/')[2] || '';
-};
+      if (!vid) {
+        const u = new URL(url);
+        if (u.hostname.includes('youtu.be')) vid = u.pathname.split('/').filter(Boolean)[0] || '';
+        if (!vid && u.pathname.startsWith('/shorts/')) vid = u.pathname.split('/')[2] || '';
+      }
       if (key && vid) {
         const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
           params: { part: 'snippet', videoId: vid, maxResults: 80, key }
@@ -624,15 +629,17 @@ if (!vid) {
 
     // ---------- REDDIT (Apify) ----------
     if (/reddit\.com$/i.test(host) && apify) {
-      const run = await apify.post('/v2/acts/apify~reddit-scraper/runs', {
-        startUrls: [{ url }], maxItems: 150, includePostComments: true
+      const run = await apify.post(`/v2/acts/apify~reddit-scraper/runs?memory=${MEM}&timeout=${TMO}`, {
+        startUrls: [{ url }],
+        maxItems: 150,
+        includePostComments: true
       });
       const runId = run.data?.data?.id;
       const wait = (ms) => new Promise(r => setTimeout(r, ms));
       let status = 'RUNNING', datasetId = null, tries = 0;
       while (tries < 20) {
         const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status = st.data?.data?.status;
+        status    = st.data?.data?.status;
         datasetId = st.data?.data?.defaultDatasetId;
         if (status === 'SUCCEEDED' && datasetId) break;
         if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
@@ -660,25 +667,19 @@ if (!vid) {
       if (!session) {
         return res.json({ ok: true, url, city, state, items: [], provider: 'apify-instagram', note: 'missing IG_SESSIONID/x-ig-sessionid' });
       }
-      const ACTOR_IG = process.env.IG_ACTOR || 'epctex~instagram-comments-scraper'; // override via env if needed
-      const run = await apify.post(`/v2/acts/${ACTOR_IG}/runs`, {
+      const ACTOR_IG = process.env.IG_ACTOR || 'epctex~instagram-comments-scraper';
+      const run = await apify.post(`/v2/acts/${ACTOR_IG}/runs?memory=${MEM}&timeout=${TMO}`, {
         directUrls: [url],
         sessionid: session,
         maxItems: 150,
         includeReplies: true
       });
-      const MEM = encodeURIComponent(process.env.APIFY_MEMORY || 512);
-const TMO = encodeURIComponent(process.env.APIFY_TIMEOUT_SEC || 120);
-
-const run = await apify.post(`/v2/acts/${ACTOR_IG}/runs?memory=${MEM}&timeout=${TMO}`, {
-  /* ... your actor input ... */
-});
       const runId = run?.data?.data?.id;
       const wait = (ms) => new Promise(r => setTimeout(r, ms));
       let status = 'RUNNING', datasetId = null, tries = 0;
       while (tries < 20) {
         const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status = st?.data?.data?.status;
+        status    = st?.data?.data?.status;
         datasetId = st?.data?.data?.defaultDatasetId;
         if (status === 'SUCCEEDED' && datasetId) break;
         if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
@@ -700,32 +701,26 @@ const run = await apify.post(`/v2/acts/${ACTOR_IG}/runs?memory=${MEM}&timeout=${
     }
 
     // ---------- FACEBOOK (Apify + logged-in cookie) ----------
-    if (/facebook\.com$|m\.facebook\.com$/i.test(host) && apify) {
-      const cookie = req.get('x-fb-cookie') || process.env.FB_COOKIE; // raw "Cookie" header string from your browser
+    if (/(^|\.)facebook\.com$/i.test(host) && apify) {
+      const cookie = req.get('x-fb-cookie') || process.env.FB_COOKIE; // raw Cookie header
       if (!cookie) {
         return res.json({ ok: true, url, city, state, items: [], provider: 'apify-facebook', note: 'missing FB_COOKIE/x-fb-cookie' });
       }
-      const ACTOR_FB = process.env.FB_ACTOR || 'epctex~facebook-comments-scraper'; // set to your preferred actor
-      const run = await apify.post(`/v2/acts/${ACTOR_FB}/runs`, {
+      const ACTOR_FB = process.env.FB_ACTOR || 'epctex~facebook-comments-scraper';
+      const run = await apify.post(`/v2/acts/${ACTOR_FB}/runs?memory=${MEM}&timeout=${TMO}`, {
         directUrls: [url],
-        cookie,              // most FB actors accept a raw Cookie header string
+        cookie,
         maxItems: 150,
-        includeReplies: true,
+        includeReplies: true
         // proxyConfiguration may be required by some actors/plans:
         // proxyConfiguration: { useApifyProxy: true, groups: ['RESIDENTIAL'] }
       });
-      const MEM = encodeURIComponent(process.env.APIFY_MEMORY || 512);
-const TMO = encodeURIComponent(process.env.APIFY_TIMEOUT_SEC || 120);
-
-const run = await apify.post(`/v2/acts/${ACTOR_FB}/runs?memory=${MEM}&timeout=${TMO}`, {
-  /* ... your actor input ... */
-});
       const runId = run?.data?.data?.id;
       const wait = (ms) => new Promise(r => setTimeout(r, ms));
       let status = 'RUNNING', datasetId = null, tries = 0;
       while (tries < 20) {
         const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status = st?.data?.data?.status;
+        status    = st?.data?.data?.status;
         datasetId = st?.data?.data?.defaultDatasetId;
         if (status === 'SUCCEEDED' && datasetId) break;
         if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
@@ -748,29 +743,23 @@ const run = await apify.post(`/v2/acts/${ACTOR_FB}/runs?memory=${MEM}&timeout=${
 
     // ---------- NEXTDOOR (Apify + logged-in cookie) ----------
     if (/nextdoor\.com$/i.test(host) && apify) {
-      const cookie = req.get('x-nd-cookie') || process.env.ND_COOKIE; // raw Cookie header string
+      const cookie = req.get('x-nd-cookie') || process.env.ND_COOKIE; // raw Cookie header
       if (!cookie) {
         return res.json({ ok: true, url, city, state, items: [], provider: 'apify-nextdoor', note: 'missing ND_COOKIE/x-nd-cookie' });
       }
-      const ACTOR_ND = process.env.ND_ACTOR || 'epctex~nextdoor-comments-scraper'; // set to your actor
-      const run = await apify.post(`/v2/acts/${ACTOR_ND}/runs`, {
+      const ACTOR_ND = process.env.ND_ACTOR || 'epctex~nextdoor-comments-scraper';
+      const run = await apify.post(`/v2/acts/${ACTOR_ND}/runs?memory=${MEM}&timeout=${TMO}`, {
         directUrls: [url],
         cookie,
         maxItems: 150,
         includeReplies: true
       });
-      const MEM = encodeURIComponent(process.env.APIFY_MEMORY || 512);
-const TMO = encodeURIComponent(process.env.APIFY_TIMEOUT_SEC || 120);
-
-const run = await apify.post(`/v2/acts/${ACTOR_ND}/runs?memory=${MEM}&timeout=${TMO}`, {
-  /* ... your actor input ... */
-});
       const runId = run?.data?.data?.id;
       const wait = (ms) => new Promise(r => setTimeout(r, ms));
       let status = 'RUNNING', datasetId = null, tries = 0;
       while (tries < 20) {
         const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status = st?.data?.data?.status;
+        status    = st?.data?.data?.status;
         datasetId = st?.data?.data?.defaultDatasetId;
         if (status === 'SUCCEEDED' && datasetId) break;
         if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
@@ -798,7 +787,6 @@ const run = await apify.post(`/v2/acts/${ACTOR_ND}/runs?memory=${MEM}&timeout=${
     res.status(500).json({ ok: false, error: 'comments failed' });
   }
 });
-
 // === /api/market-report : simple placeholder so your node doesn’t 404 ===
 app.post('/api/market-report', async (req, res) => {
   const { city='', state='' } = req.body || {};

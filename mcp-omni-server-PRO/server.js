@@ -1001,6 +1001,36 @@ app.get('/api/performance/digest', (req, res) => {
     }
   });
 });
+// Test Instagram session endpoint
+app.get('/api/test-instagram', async (req, res) => {
+  const session = process.env.IG_SESSIONID;
+  
+  if (!session) {
+    return res.json({ error: 'No IG_SESSIONID in environment' });
+  }
+  
+  try {
+    const testResponse = await axios.get('https://www.instagram.com/api/v1/users/web_profile_info/?username=instagram', {
+      headers: {
+        'Cookie': `sessionid=${session}`,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      timeout: 10000
+    });
+    
+    return res.json({ 
+      success: true, 
+      sessionValid: testResponse.status === 200,
+      sessionLength: session.length 
+    });
+  } catch (e) {
+    return res.json({ 
+      success: false, 
+      error: e.message,
+      sessionLength: session.length 
+    });
+  }
+});
 // ---- Global error guard ----
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);

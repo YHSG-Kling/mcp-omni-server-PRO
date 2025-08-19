@@ -263,92 +263,198 @@ app.post('/api/scrape', async (req, res) => {
 });
 
 
+// FIXED /api/discover endpoint - Replace in your server.js
 app.post('/api/discover', async (req, res) => {
   try {
     const perplex = client('perplexity');
-    const apify   = client('apify');
+    const apify = client('apify');
     const { queries = [], location = {}, locations = [] } = req.body || {};
 
-    // normalize inputs
-    const qList = Array.isArray(queries) ? queries.filter(Boolean) : [String(queries)].filter(Boolean);
-    const locs  = Array.isArray(locations) && locations.length ? locations : [location].filter(Boolean);
+    console.log('Discovery started with:', { 
+      queries: queries.length, 
+      locations: locations.length,
+      perplexityEnabled: !!perplex,
+      apifyEnabled: !!apify 
+    });
 
-    const model = ((process.env.PPLX_MODEL || 'sonar') + '').trim().toLowerCase(); // 'sonar' | 'sonar-pro'
+    // Normalize inputs
+    const qList = Array.isArray(queries) ? queries.filter(Boolean) : [String(queries)].filter(Boolean);
+    const locs = Array.isArray(locations) && locations.length ? locations : [location].filter(Boolean);
+
+    // Use sonar-pro for better results
+    const model = 'sonar-pro';
+    
     const allowedDomains = [
-  'reddit.com','facebook.com','m.facebook.com','instagram.com',
-  'youtube.com','youtu.be','zillow.com','realtor.com','redfin.com',
-  'trulia.com','homes.com','apartments.com','nextdoor.com','x.com',
-  'twitter.com','linkedin.com'
-];
-    const isAllowed = (u) => { try { const h = new URL(u).hostname.replace(/^www\./,''); return allowedDomains.some(d => h.endsWith(d)); } catch { return false; } };
+      'reddit.com', 'facebook.com', 'm.facebook.com', 'instagram.com',
+      'youtube.com', 'youtu.be', 'zillow.com', 'realtor.com', 'redfin.com',
+      'trulia.com', 'homes.com', 'apartments.com', 'nextdoor.com', 'x.com',
+      'twitter.com', 'linkedin.com', 'tiktok.com'
+    ];
+    
+    const isAllowed = (u) => { 
+      try { 
+        const h = new URL(u).hostname.replace(/^www\./, ''); 
+        return allowedDomains.some(d => h.endsWith(d)); 
+      } catch { 
+        return false; 
+      } 
+    };
 
     const allItems = [];
     const seen = new Set();
 
-
-
     for (const loc of locs) {
-      const userPrompt = qList.length ? qList.map(q => `• ${q}`).join('\n') : 'buyer intent signals for real estate';
+      console.log(`Processing location: ${loc.city}, ${loc.state}`);
+      
+      // Create more focused queries
+      const locationQueries = qList.map(q => {
+        return `${q} ${loc.city} ${loc.state}`;
+      });
 
       let items = [];
 
-      // --- Try Perplexity for this location
+      // Enhanced Perplexity search with better prompts
       if (perplex) {
         try {
-          const payload = {
-            model,
-            messages: [
-              { role: 'system', content: 'You are a lead intelligence researcher for real estate buyer intent.' },
-              { role: 'user', content:
-`Find fresh public posts/pages that signal active home-buying in ${loc.city || ''}, ${loc.state || ''}.
-Prefer reddit.com, facebook.com, instagram.com, youtube.com, zillow.com, realtor.com, nextdoor.com, x.com, linkedin.com.
-Return JSON with "items": [{title, url, platform, contentSnippet}].
+          for (const query of locationQueries.slice(0, 3)) { // Limit to prevent rate limits
+            console.log(`Searching: ${query}`);
+            
+            const payload = {
+              model,
+              messages: [
+                { 
+                  role: 'system', 
+                  content: 'You are a real estate lead research specialist. Find recent posts and discussions about people looking to buy or sell homes. Focus on social media posts, forum discussions, and real estate websites where people express buying intent.'
+                },
+                { 
+                  role: 'user', 
+                  content: `Find recent posts and discussions about: ${query}
 
-Queries:
-${userPrompt}` }
-            ],
-            stream: false,
-            search_recency_filter: 'week'
-          };
+Return a JSON array with this exact format:
+{
+  "results": [
+    {
+      "title": "Post or page title",
+      "url": "full URL",
+      "platform": "reddit/facebook/instagram/youtube/zillow/etc",
+      "snippet": "Content preview showing buyer/seller intent",
+      "relevance": "high/medium/low"
+    }
+  ]
+}
 
-          const r = await perplex.post('/chat/completions', payload);
-          const data = r.data || {};
+Focus on:
+- Social media posts about moving, house hunting, or real estate
+- Reddit discussions in real estate subreddits
+- Real estate listing sites
+- YouTube videos about home buying/selling
+- Facebook groups discussing real estate
 
-          if (Array.isArray(data.search_results)) {
-            items = data.search_results
-              .map(s => ({ title: s.title || 'Found', url: s.url, platform: 'web', contentSnippet: s.snippet || '' }))
-              .filter(i => isAllowed(i.url));
-          }
+Only include URLs from: ${allowedDomains.join(', ')}`
+                }
+              ],
+              stream: false,
+              search_recency_filter: 'week',
+              return_related_questions: false,
+              return_images: false
+            };
 
-          if ((!items || items.length === 0) && data.choices?.[0]?.message?.content) {
-            const txt = data.choices[0].message.content;
-            try {
-              const parsed = JSON.parse(txt);
-              if (Array.isArray(parsed.items)) {
-                items = parsed.items
-                  .map(o => ({ title: o.title || 'Found', url: o.url, platform: o.platform || 'web', contentSnippet: o.content || o.contentSnippet || '' }))
-                  .filter(i => isAllowed(i.url));
+            const r = await perplex.post('/chat/completions', payload);
+            const data = r.data || {};
+
+            console.log('Perplexity response structure:', {
+              hasChoices: !!data.choices,
+              hasSearchResults: !!data.search_results,
+              choicesLength: data.choices?.length || 0,
+              searchResultsLength: data.search_results?.length || 0
+            });
+
+            // Try to extract from search_results first
+            if (Array.isArray(data.search_results) && data.search_results.length > 0) {
+              console.log('Using search_results:', data.search_results.length);
+              
+              for (const result of data.search_results.slice(0, 10)) {
+                if (result.url && isAllowed(result.url)) {
+                  items.push({
+                    title: result.title || result.name || 'Found Result',
+                    url: result.url,
+                    platform: extractPlatform(result.url),
+                    contentSnippet: result.snippet || result.description || result.text || '',
+                    relevance: 'medium'
+                  });
+                }
               }
-            } catch {
-              const urlRegex = /(https?:\/\/[^\s)]+)\)?/g;
-              const urls = [...txt.matchAll(urlRegex)].map(m => m[1]).filter(isAllowed);
-              items = urls.slice(0, 20).map(u => ({ title: 'Found', url: u, platform: 'web', contentSnippet: '' }));
             }
+
+            // Try to extract from AI response
+            if (data.choices?.[0]?.message?.content) {
+              const content = data.choices[0].message.content;
+              console.log('AI response preview:', content.substring(0, 200));
+              
+              try {
+                // Clean the response
+                let cleanContent = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+                
+                // Try to find JSON in the response
+                const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                  const parsed = JSON.parse(jsonMatch[0]);
+                  
+                  if (parsed.results && Array.isArray(parsed.results)) {
+                    console.log('Found structured results:', parsed.results.length);
+                    
+                    for (const item of parsed.results) {
+                      if (item.url && isAllowed(item.url)) {
+                        items.push({
+                          title: item.title || 'AI Found Result',
+                          url: item.url,
+                          platform: item.platform || extractPlatform(item.url),
+                          contentSnippet: item.snippet || '',
+                          relevance: item.relevance || 'medium'
+                        });
+                      }
+                    }
+                  }
+                }
+              } catch (parseError) {
+                console.log('JSON parse failed, extracting URLs manually');
+                
+                // Fallback: extract URLs manually
+                const urlRegex = /(https?:\/\/[^\s)'"]+)/g;
+                const urls = [...content.matchAll(urlRegex)]
+                  .map(m => m[1])
+                  .filter(isAllowed)
+                  .slice(0, 5);
+                
+                for (const url of urls) {
+                  items.push({
+                    title: 'Manual Extract',
+                    url: url,
+                    platform: extractPlatform(url),
+                    contentSnippet: `Found via AI search for: ${query}`,
+                    relevance: 'low'
+                  });
+                }
+              }
+            }
+
+            // Small delay to respect rate limits
+            await new Promise(resolve => setTimeout(resolve, 1000));
           }
-        } catch (e) {
-          console.error('[discover] Perplexity error (city:', loc.city, '):', e?.response?.data || e.message);
+        } catch (error) {
+          console.error('Perplexity error:', error?.response?.data || error.message);
         }
       }
 
-      // --- Apify fallback if needed (per location)
-      if ((!items || items.length === 0) && apify && qList.length) {
+      // Apify fallback with Google Search
+      if (items.length < 5 && apify) {
         try {
-          const gsQueriesString = qList
-            .map(q => `${q} site:(${allowedDomains.join(' OR ')}) ${loc.city || ''} ${loc.state || ''}`.trim())
-            .join('\n');
-
+          console.log('Using Apify fallback for more results');
+          
+          const searchQuery = `${locationQueries[0]} site:(${allowedDomains.slice(0, 5).join(' OR ')})`;
+          
           const start = await apify.post('/v2/acts/apify~google-search-scraper/runs', {
-            queries: gsQueriesString,
+            queries: searchQuery,
             maxPagesPerQuery: 1,
             resultsPerPage: 10,
             countryCode: 'us',
@@ -356,51 +462,107 @@ ${userPrompt}` }
           });
 
           const runId = start.data?.data?.id;
-          if (!runId) throw new Error('No Apify run id');
+          if (runId) {
+            // Wait for completion
+            const wait = ms => new Promise(r => setTimeout(r, ms));
+            let status = 'RUNNING', datasetId = null, tries = 0;
+            
+            while (tries < 15) {
+              const st = await apify.get(`/v2/actor-runs/${runId}`);
+              status = st.data?.data?.status;
+              datasetId = st.data?.data?.defaultDatasetId;
+              
+              if (status === 'SUCCEEDED' && datasetId) break;
+              if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) break;
+              
+              await wait(2000);
+              tries++;
+            }
 
-          const wait = ms => new Promise(r => setTimeout(r, ms));
-          let status = 'RUNNING', datasetId = null, tries = 0;
-          while (tries < 20) {
-            const st = await apify.get(`/v2/actor-runs/${runId}`);
-            status    = st.data?.data?.status;
-            datasetId = st.data?.data?.defaultDatasetId;
-            if (status === 'SUCCEEDED' && datasetId) break;
-            if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
-            await wait(1500); tries++;
+            if (status === 'SUCCEEDED' && datasetId) {
+              const itemsResp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+              const raw = Array.isArray(itemsResp.data) ? itemsResp.data : [];
+              
+              for (const result of raw.slice(0, 10)) {
+                if (result.url && isAllowed(result.url)) {
+                  items.push({
+                    title: result.title || 'Search Result',
+                    url: result.url,
+                    platform: extractPlatform(result.url),
+                    contentSnippet: result.snippet || result.description || 'Found via search',
+                    relevance: 'medium'
+                  });
+                }
+              }
+            }
           }
-
-          if (status === 'SUCCEEDED' && datasetId) {
-            const itemsResp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
-            const raw = Array.isArray(itemsResp.data) ? itemsResp.data : [];
-            items = raw.map(r => ({
-              title: r.title || 'Found', url: r.url, platform: 'web', contentSnippet: r.snippet || ''
-            })).filter(i => isAllowed(i.url));
-          }
-        } catch (e) {
-          console.error('[discover] Apify fallback error (city:', loc.city, '):', e?.response?.data || e.message);
+        } catch (apifyError) {
+          console.error('Apify fallback error:', apifyError.message);
         }
       }
 
-      // Tag each item with the location used and dedupe by URL
-      for (const it of (items || [])) {
-        if (!it.url || seen.has(it.url)) continue;
-        seen.add(it.url);
-        allItems.push({ ...it, city: loc.city, state: loc.state });
+      // Add location context and dedupe
+      for (const item of items) {
+        const key = item.url;
+        if (!seen.has(key)) {
+          seen.add(key);
+          allItems.push({
+            ...item,
+            city: loc.city,
+            state: loc.state
+          });
+        }
       }
     }
 
+    console.log(`Discovery complete: ${allItems.length} items found`);
+
     return res.json({
       ok: true,
-      items: allItems.slice(0, 60), // cap total
-      provider: allItems.length ? 'perplexity|apify' : 'none',
-      locations: locs
+      items: allItems.slice(0, 50), // Limit results
+      provider: allItems.length > 0 ? 'perplexity|apify' : 'none',
+      locations: locs,
+      debug: {
+        queriesProcessed: qList.length,
+        locationsProcessed: locs.length,
+        totalFound: allItems.length
+      }
     });
-  } catch (e) {
-    console.error('discover fatal:', e?.response?.data || e.message);
-    return res.status(200).json({ ok: true, items: [], warning: 'discover failed; returned empty list' });
+
+  } catch (error) {
+    console.error('Discovery fatal error:', error?.response?.data || error.message);
+    return res.status(200).json({ 
+      ok: true, 
+      items: [], 
+      warning: 'discovery failed; returned empty list',
+      error: error.message 
+    });
   }
 });
 
+// Helper function to extract platform from URL
+function extractPlatform(url) {
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+    
+    if (hostname.includes('reddit')) return 'reddit';
+    if (hostname.includes('facebook')) return 'facebook';
+    if (hostname.includes('instagram')) return 'instagram';
+    if (hostname.includes('youtube') || hostname.includes('youtu.be')) return 'youtube';
+    if (hostname.includes('zillow')) return 'zillow';
+    if (hostname.includes('realtor')) return 'realtor';
+    if (hostname.includes('redfin')) return 'redfin';
+    if (hostname.includes('trulia')) return 'trulia';
+    if (hostname.includes('x.com') || hostname.includes('twitter')) return 'twitter';
+    if (hostname.includes('linkedin')) return 'linkedin';
+    if (hostname.includes('tiktok')) return 'tiktok';
+    if (hostname.includes('nextdoor')) return 'nextdoor';
+    
+    return 'web';
+  } catch {
+    return 'web';
+  }
+}
 
 // ---- 3) Fuse + Score (relocation/PCS + geo + safe) ----
 app.post('/api/fuse-score', (req, res) => {

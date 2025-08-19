@@ -596,7 +596,14 @@ app.post('/api/comments', async (req, res) => {
     // ---------- YOUTUBE (official API) ----------
     if (/youtube\.com|youtu\.be/i.test(host)) {
       const key = process.env.YOUTUBE_API_KEY;
-      const vid = (url.match(/[?&]v=([^&#]+)/) || [])[1];
+      let vid = (url.match(/[?&]v=([^&#]+)/) || [])[1];
+if (!vid) {
+  const u = new URL(url);
+  // youtu.be/<id>
+  if (u.hostname.includes('youtu.be')) vid = u.pathname.split('/').filter(Boolean)[0] || '';
+  // shorts/<id>
+  if (!vid && u.pathname.startsWith('/shorts/')) vid = u.pathname.split('/')[2] || '';
+};
       if (key && vid) {
         const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
           params: { part: 'snippet', videoId: vid, maxResults: 80, key }
@@ -660,6 +667,12 @@ app.post('/api/comments', async (req, res) => {
         maxItems: 150,
         includeReplies: true
       });
+      const MEM = encodeURIComponent(process.env.APIFY_MEMORY || 512);
+const TMO = encodeURIComponent(process.env.APIFY_TIMEOUT_SEC || 120);
+
+const run = await apify.post(`/v2/acts/${ACTOR_IG}/runs?memory=${MEM}&timeout=${TMO}`, {
+  /* ... your actor input ... */
+});
       const runId = run?.data?.data?.id;
       const wait = (ms) => new Promise(r => setTimeout(r, ms));
       let status = 'RUNNING', datasetId = null, tries = 0;
@@ -701,6 +714,12 @@ app.post('/api/comments', async (req, res) => {
         // proxyConfiguration may be required by some actors/plans:
         // proxyConfiguration: { useApifyProxy: true, groups: ['RESIDENTIAL'] }
       });
+      const MEM = encodeURIComponent(process.env.APIFY_MEMORY || 512);
+const TMO = encodeURIComponent(process.env.APIFY_TIMEOUT_SEC || 120);
+
+const run = await apify.post(`/v2/acts/${ACTOR_FB}/runs?memory=${MEM}&timeout=${TMO}`, {
+  /* ... your actor input ... */
+});
       const runId = run?.data?.data?.id;
       const wait = (ms) => new Promise(r => setTimeout(r, ms));
       let status = 'RUNNING', datasetId = null, tries = 0;
@@ -740,6 +759,12 @@ app.post('/api/comments', async (req, res) => {
         maxItems: 150,
         includeReplies: true
       });
+      const MEM = encodeURIComponent(process.env.APIFY_MEMORY || 512);
+const TMO = encodeURIComponent(process.env.APIFY_TIMEOUT_SEC || 120);
+
+const run = await apify.post(`/v2/acts/${ACTOR_ND}/runs?memory=${MEM}&timeout=${TMO}`, {
+  /* ... your actor input ... */
+});
       const runId = run?.data?.data?.id;
       const wait = (ms) => new Promise(r => setTimeout(r, ms));
       let status = 'RUNNING', datasetId = null, tries = 0;

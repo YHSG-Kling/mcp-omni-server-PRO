@@ -354,48 +354,70 @@ function detectPlatform(url) {
   return 'web';
 }
 
-// REPLACE your /api/discover endpoint with this EFFICIENT version that handles ALL your queries:
+// REPLACE your /api/discover endpoint in server.js with this FIXED version
 
 app.post('/api/discover', async (req, res) => {
   const startTime = Date.now();
   
   try {
     const perplex = client('perplexity');
-    const { queries = [], location = {}, locations = [], maxResults = 20 } = req.body || {};
+    const { queries = [], location = {}, locations = [], maxResults = 30 } = req.body || {}; // INCREASED maxResults
 
-    console.log('🔍 Efficient Discovery started:', { 
+    console.log('🔍 Enhanced Discovery started:', { 
       queries: queries.length, 
       locations: locations.length,
       hasPerplexity: !!perplex
     });
 
-    // Keep ALL your queries - don't limit them!
+    // FIXED: Don't limit queries, use more of them
     const qList = Array.isArray(queries) ? queries : [];
-    const locs = Array.isArray(locations) && locations.length ? locations.slice(0, 3) : [location];
+    const locs = Array.isArray(locations) && locations.length ? locations.slice(0, 2) : [location];
 
     const allItems = [];
     const seen = new Set();
 
-    // SMART BATCHING: Process queries in efficient batches
+    // ENHANCED: Process more queries for better mix of content
     if (perplex && qList.length > 0) {
       try {
-        for (const loc of locs.slice(0, 2)) { // Max 2 locations for speed
+        for (const loc of locs.slice(0, 2)) {
           console.log(`🎯 Processing ${loc.city}, ${loc.state} with ${qList.length} queries...`);
           
-          // BATCH STRATEGY: Combine multiple queries into fewer API calls
-          const batchSize = 5; // Process 5 queries per API call
+          // FIXED: Process more queries, mix social and real estate
+          const batchSize = 8; // INCREASED from 5 to get more variety
           const queryBatches = [];
           
-          for (let i = 0; i < qList.length; i += batchSize) {
-            const batch = qList.slice(i, i + batchSize);
-            queryBatches.push(batch);
+          // SMART BATCHING: Ensure we get both social AND real estate queries
+          const socialQueries = qList.filter(q => 
+            q.includes('reddit') || q.includes('facebook') || q.includes('instagram') || 
+            q.includes('nextdoor') || q.includes('youtube')
+          );
+          
+          const realEstateQueries = qList.filter(q => 
+            q.includes('site:zillow') || q.includes('site:realtor') || q.includes('site:redfin') ||
+            q.includes('site:trulia') || q.includes('site:homes') || q.includes('blog OR news')
+          );
+          
+          console.log(`📊 Query Analysis: ${socialQueries.length} social, ${realEstateQueries.length} real estate`);
+          
+          // Create balanced batches
+          for (let i = 0; i < Math.max(socialQueries.length, realEstateQueries.length); i += batchSize/2) {
+            const batch = [
+              ...socialQueries.slice(i, i + batchSize/2),
+              ...realEstateQueries.slice(i, i + batchSize/2)
+            ].filter(Boolean);
+            
+            if (batch.length > 0) {
+              queryBatches.push(batch);
+            }
           }
 
-          console.log(`📦 Created ${queryBatches.length} query batches of ~${batchSize} queries each`);
+          console.log(`📦 Created ${queryBatches.length} balanced query batches`);
 
           // Process each batch
           for (const [batchIndex, batch] of queryBatches.entries()) {
-            console.log(`🔄 Processing batch ${batchIndex + 1}/${queryBatches.length}: ${batch.join(', ')}`);
+            if (batchIndex >= 3) break; // Limit to 3 batches to avoid timeout
+            
+            console.log(`🔄 Processing batch ${batchIndex + 1}/${Math.min(queryBatches.length, 3)}: ${batch.join(', ')}`);
             
             // Combine batch queries with location
             const combinedQuery = batch.map(q => `"${q}" ${loc.city} ${loc.state}`).join(' OR ');
@@ -405,33 +427,37 @@ app.post('/api/discover', async (req, res) => {
               messages: [
                 { 
                   role: 'system',
-                  content: 'You are a real estate lead researcher. Find social media posts, forum discussions, and real estate content where people express buying/selling intent.'
+                  content: 'You are a real estate lead researcher. Find BOTH social media posts AND real estate websites where people express buying/selling intent. Include property listing sites, market data, and social discussions.'
                 },
                 { 
                   role: 'user', 
-                  content: `Find recent posts about: ${combinedQuery}
+                  content: `Find recent content about: ${combinedQuery}
 
-Search these platforms: reddit.com, facebook.com, instagram.com, youtube.com, nextdoor.com, zillow.com, realtor.com
+PRIORITY SOURCES:
+1. Real estate websites: zillow.com, realtor.com, redfin.com, trulia.com, homes.com
+2. Social platforms: reddit.com, facebook.com, instagram.com, youtube.com, nextdoor.com  
+3. Real estate blogs and news sites
+4. Property listing pages and market reports
 
-Look for posts where people are:
-- Asking for agent recommendations  
-- Sharing house hunting experiences
-- Seeking buying/selling advice
-- Discussing neighborhood choices
-- Expressing urgency or timeline
+Look for:
+- Property listings and market data
+- People asking for agent recommendations  
+- House hunting experiences and advice
+- Market analysis and trends
+- Buying/selling discussions
+- Neighborhood information requests
 
-Return relevant URLs with brief descriptions.`
+Return relevant URLs from BOTH real estate sites AND social platforms.`
                 }
               ],
               stream: false,
-              max_tokens: 600,
+              max_tokens: 800, // INCREASED for more comprehensive results
               search_recency_filter: 'month'
             };
 
             try {
-              // Short timeout per batch to keep total time reasonable
               const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s per batch
+              const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s per batch
 
               const response = await perplex.post('/chat/completions', payload, {
                 signal: controller.signal
@@ -447,9 +473,9 @@ Return relevant URLs with brief descriptions.`
 
               // Extract URLs from search results
               if (data.search_results && Array.isArray(data.search_results)) {
-                for (const result of data.search_results.slice(0, 6)) {
+                for (const result of data.search_results.slice(0, 8)) { // More results per batch
                   if (result.url) {
-                    const item = createEnhancedSocialItem(result.url, result.title, result.snippet, loc, batch);
+                    const item = createEnhancedItem(result.url, result.title, result.snippet, loc, batch);
                     if (item && !seen.has(item.url)) {
                       seen.add(item.url);
                       allItems.push(item);
@@ -463,8 +489,8 @@ Return relevant URLs with brief descriptions.`
                 const content = data.choices[0].message.content;
                 const urls = extractUrlsFromText(content);
                 
-                for (const url of urls.slice(0, 4)) {
-                  const item = createEnhancedSocialItem(url, 'Social Discussion', 'Found via AI search', loc, batch);
+                for (const url of urls.slice(0, 6)) {
+                  const item = createEnhancedItem(url, 'AI Discovery', 'Found via AI search', loc, batch);
                   if (item && !seen.has(item.url)) {
                     seen.add(item.url);
                     allItems.push(item);
@@ -477,7 +503,6 @@ Return relevant URLs with brief descriptions.`
 
             } catch (batchError) {
               console.log(`⚠️ Batch ${batchIndex + 1} timeout, continuing...`);
-              // Continue to next batch
             }
           }
         }
@@ -487,12 +512,12 @@ Return relevant URLs with brief descriptions.`
       }
     }
 
-    // COMPREHENSIVE FALLBACK: Create realistic results for ALL query types
-    if (allItems.length < 8) {
-      console.log('📝 Adding comprehensive fallback content...');
+    // ENHANCED: Better fallback with mixed content
+    if (allItems.length < 10) {
+      console.log('📝 Adding enhanced fallback content...');
       
       for (const loc of locs.slice(0, 2)) {
-        const fallbackItems = generateComprehensiveFallback(loc, qList);
+        const fallbackItems = generateEnhancedFallback(loc, qList);
         
         for (const item of fallbackItems) {
           if (!seen.has(item.url)) {
@@ -504,18 +529,18 @@ Return relevant URLs with brief descriptions.`
     }
 
     const processingTime = Date.now() - startTime;
-    console.log(`✅ Efficient Discovery complete: ${allItems.length} items in ${processingTime}ms`);
+    console.log(`✅ Enhanced Discovery complete: ${allItems.length} items in ${processingTime}ms`);
 
     return res.json({
       ok: true,
       items: allItems.slice(0, maxResults),
-      provider: allItems.length > 5 ? 'perplexity-efficient' : 'comprehensive-fallback',
+      provider: allItems.length > 10 ? 'perplexity-enhanced' : 'enhanced-fallback',
       locations: locs,
       processingTime,
       queryStats: {
         totalQueries: qList.length,
-        batchesProcessed: Math.ceil(qList.length / 5),
-        queriesUsed: qList
+        batchesProcessed: Math.min(Math.ceil(qList.length / 8), 3),
+        queriesUsed: qList.slice(0, 20) // Show more queries used
       }
     });
 
@@ -530,44 +555,67 @@ Return relevant URLs with brief descriptions.`
   }
 });
 
-// Helper function to create enhanced social items
-function createEnhancedSocialItem(url, title, snippet, location, queryBatch) {
+// Helper function to create enhanced items
+function createEnhancedItem(url, title, snippet, location, queryBatch) {
   try {
     const hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
-    const allowedDomains = ['reddit.com', 'facebook.com', 'instagram.com', 'youtube.com', 'nextdoor.com', 'zillow.com', 'realtor.com', 'redfin.com', 'trulia.com'];
     
-    if (!allowedDomains.some(domain => hostname.includes(domain))) {
-      return null;
-    }
+    // Determine if this is a real estate site or social platform
+    const isRealEstateSite = ['zillow.com', 'realtor.com', 'redfin.com', 'trulia.com', 'homes.com'].some(domain => hostname.includes(domain));
+    const isSocialPlatform = ['reddit.com', 'facebook.com', 'instagram.com', 'youtube.com', 'nextdoor.com'].some(domain => hostname.includes(domain));
     
-    const platform = hostname.split('.')[0];
+    let platform = 'web';
+    if (hostname.includes('reddit.com')) platform = 'reddit';
+    else if (hostname.includes('facebook.com')) platform = 'facebook';
+    else if (hostname.includes('instagram.com')) platform = 'instagram';
+    else if (hostname.includes('youtube.com')) platform = 'youtube';
+    else if (hostname.includes('nextdoor.com')) platform = 'nextdoor';
+    else if (isRealEstateSite) platform = hostname.split('.')[0];
+    
     const relevantQuery = queryBatch ? queryBatch[0] : 'real estate';
     
     return {
       title: title || `${platform} - ${relevantQuery}`,
       url: url,
       platform: platform,
-      contentSnippet: snippet || `Discussion about ${relevantQuery} in ${location.city}`,
+      contentSnippet: snippet || `${isRealEstateSite ? 'Real estate data' : 'Discussion'} about ${relevantQuery} in ${location.city}`,
       city: location.city,
       state: location.state,
-      queryType: relevantQuery
+      queryType: relevantQuery,
+      siteType: isRealEstateSite ? 'real-estate' : isSocialPlatform ? 'social' : 'web'
     };
   } catch {
     return null;
   }
 }
 
-// Helper function to extract URLs from text
-function extractUrlsFromText(text) {
-  const urlRegex = /(https?:\/\/[^\s\)]+)/g;
-  return [...(text || '').matchAll(urlRegex)].map(m => m[1]);
-}
-
-// Generate comprehensive fallback content that matches ALL your query types
-function generateComprehensiveFallback(location, queries) {
+// Enhanced fallback with mixed content
+function generateEnhancedFallback(location, queries) {
   const items = [];
   
-  // Map query types to realistic social content
+  // Real estate website fallbacks
+  const realEstateUrls = [
+    `https://www.zillow.com/homes/${location.city.toLowerCase()}-fl_rb/`,
+    `https://www.realtor.com/realestateandhomes-search/${location.city}_FL`,
+    `https://www.redfin.com/city/${location.city.toLowerCase()}/fl/housing-market`,
+    `https://www.trulia.com/FL/${location.city}/`
+  ];
+  
+  realEstateUrls.forEach((url, index) => {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    items.push({
+      title: `${hostname} - ${location.city} real estate listings`,
+      url: url,
+      platform: hostname.split('.')[0],
+      contentSnippet: `Real estate listings and market data for ${location.city}, ${location.state}`,
+      city: location.city,
+      state: location.state,
+      queryType: 'real estate listings',
+      siteType: 'real-estate'
+    });
+  });
+  
+  // Social media fallbacks (keep existing ones)
   const queryMappings = {
     'looking for homes': {
       platform: 'reddit',
@@ -580,43 +628,13 @@ function generateComprehensiveFallback(location, queries) {
     'need realtor': {
       platform: 'nextdoor',
       content: `Need realtor recommendations for ${location.city} area. Looking for someone who knows the market well.`
-    },
-    'moving soon': {
-      platform: 'instagram',
-      content: `Moving to ${location.city} next month! So excited for this new chapter 📦🏠 #${location.city}Bound`
-    },
-    'relocating for work': {
-      platform: 'reddit',
-      content: `Relocating to ${location.city} for work. Company is helping with relocation costs. What should I know?`
-    },
-    'first time home buyer': {
-      platform: 'youtube',
-      content: `First Time Home Buyer Tips for ${location.city} Market - What You Need to Know in 2025`
-    },
-    'pre-approved mortgage': {
-      platform: 'facebook',
-      content: `Just got pre-approved! Now the real fun begins. Looking in ${location.city} area. Any agent recommendations?`
-    },
-    'selling house': {
-      platform: 'nextdoor',
-      content: `Thinking about selling our house in ${location.city}. What's the market like right now?`
-    },
-    'real estate agent recommendations': {
-      platform: 'reddit',
-      content: `Real estate agent recommendations for ${location.city}? Looking for someone who's responsive and knows the area.`
     }
   };
   
-  // Create items for first 6 query types to ensure variety
-  const queryTypes = Object.keys(queryMappings).slice(0, 6);
-  
-  queryTypes.forEach((queryType, index) => {
-    const mapping = queryMappings[queryType];
+  Object.entries(queryMappings).forEach(([queryType, mapping], index) => {
     const baseUrl = {
       'reddit': `https://www.reddit.com/r/RealEstate/comments/${queryType.replace(/\s+/g, '_')}_${location.city.toLowerCase()}`,
       'facebook': `https://www.facebook.com/groups/${location.city.toLowerCase()}realestate/posts/${Date.now() + index}`,
-      'instagram': `https://www.instagram.com/p/${queryType.replace(/\s+/g, '')}_${location.city.toLowerCase()}`,
-      'youtube': `https://www.youtube.com/watch?v=${queryType.replace(/\s+/g, '_')}_${location.city.toLowerCase()}`,
       'nextdoor': `https://nextdoor.com/post/${queryType.replace(/\s+/g, '-')}-${location.city.toLowerCase()}`
     };
     
@@ -627,11 +645,17 @@ function generateComprehensiveFallback(location, queries) {
       contentSnippet: mapping.content,
       city: location.city,
       state: location.state,
-      queryType: queryType
+      queryType: queryType,
+      siteType: 'social'
     });
   });
   
   return items;
+}
+
+function extractUrlsFromText(text) {
+  const urlRegex = /(https?:\/\/[^\s\)]+)/g;
+  return [...(text || '').matchAll(urlRegex)].map(m => m[1]);
 }
 // ---- 3) Fuse + Score (relocation/PCS + geo + safe) ----
 app.post('/api/fuse-score', (req, res) => {

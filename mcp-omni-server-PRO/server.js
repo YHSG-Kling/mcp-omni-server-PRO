@@ -354,156 +354,61 @@ function detectPlatform(url) {
   return 'web';
 }
 
-// REPLACE your /api/discover endpoint in server.js with this FIXED version
+// REPLACE your /api/discover endpoint in server.js with this FIXED version:
 
 app.post('/api/discover', async (req, res) => {
   const startTime = Date.now();
   
   try {
     const perplex = client('perplexity');
-    const { queries = [], location = {}, locations = [], maxResults = 30 } = req.body || {}; // INCREASED maxResults
+    const { queries = [], location = {}, locations = [], maxResults = 40 } = req.body || {};
 
-    console.log('🔍 Enhanced Discovery started:', { 
+    console.log('🔍 FIXED Discovery started:', { 
       queries: queries.length, 
       locations: locations.length,
       hasPerplexity: !!perplex
     });
 
-    // FIXED: Don't limit queries, use more of them
     const qList = Array.isArray(queries) ? queries : [];
     const locs = Array.isArray(locations) && locations.length ? locations.slice(0, 2) : [location];
 
     const allItems = [];
     const seen = new Set();
 
-    // ENHANCED: Process more queries for better mix of content
     if (perplex && qList.length > 0) {
       try {
         for (const loc of locs.slice(0, 2)) {
-          console.log(`🎯 Processing ${loc.city}, ${loc.state} with ${qList.length} queries...`);
+          console.log(`🎯 Processing ${loc.city}, ${loc.state} with MIXED queries...`);
           
-          // FIXED: Process more queries, mix social and real estate
-          const batchSize = 8; // INCREASED from 5 to get more variety
-          const queryBatches = [];
-          
-          // SMART BATCHING: Ensure we get both social AND real estate queries
+          // SMART CATEGORIZATION: Separate social vs real estate queries
           const socialQueries = qList.filter(q => 
-            q.includes('reddit') || q.includes('facebook') || q.includes('instagram') || 
-            q.includes('nextdoor') || q.includes('youtube')
+            q.includes('reddit.com') || q.includes('facebook.com') || q.includes('instagram.com') || 
+            q.includes('nextdoor.com') || q.includes('youtube.com') || !q.includes('site:')
           );
           
           const realEstateQueries = qList.filter(q => 
             q.includes('site:zillow') || q.includes('site:realtor') || q.includes('site:redfin') ||
-            q.includes('site:trulia') || q.includes('site:homes') || q.includes('blog OR news')
+            q.includes('site:trulia') || q.includes('site:homes')
           );
           
-          console.log(`📊 Query Analysis: ${socialQueries.length} social, ${realEstateQueries.length} real estate`);
+          console.log(`📊 Query Mix: ${socialQueries.length} social, ${realEstateQueries.length} real estate`);
           
-          // Create balanced batches
-          for (let i = 0; i < Math.max(socialQueries.length, realEstateQueries.length); i += batchSize/2) {
-            const batch = [
-              ...socialQueries.slice(i, i + batchSize/2),
-              ...realEstateQueries.slice(i, i + batchSize/2)
-            ].filter(Boolean);
+          // Process social queries (higher priority for comments)
+          for (let i = 0; i < Math.min(socialQueries.length, 8); i++) {
+            const query = socialQueries[i];
+            const combinedQuery = `${query} ${loc.city} ${loc.state}`;
             
-            if (batch.length > 0) {
-              queryBatches.push(batch);
-            }
+            await processQuery(combinedQuery, 'social', loc, perplex, allItems, seen);
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limiting
           }
-
-          console.log(`📦 Created ${queryBatches.length} balanced query batches`);
-
-          // Process each batch
-          for (const [batchIndex, batch] of queryBatches.entries()) {
-            if (batchIndex >= 3) break; // Limit to 3 batches to avoid timeout
+          
+          // Process real estate queries (for scraping)
+          for (let i = 0; i < Math.min(realEstateQueries.length, 6); i++) {
+            const query = realEstateQueries[i];
+            const combinedQuery = `${query} ${loc.city} ${loc.state}`;
             
-            console.log(`🔄 Processing batch ${batchIndex + 1}/${Math.min(queryBatches.length, 3)}: ${batch.join(', ')}`);
-            
-            // Combine batch queries with location
-            const combinedQuery = batch.map(q => `"${q}" ${loc.city} ${loc.state}`).join(' OR ');
-            
-            const payload = {
-              model: 'sonar-pro',
-              messages: [
-                { 
-                  role: 'system',
-                  content: 'You are a real estate lead researcher. Find BOTH social media posts AND real estate websites where people express buying/selling intent. Include property listing sites, market data, and social discussions.'
-                },
-                { 
-                  role: 'user', 
-                  content: `Find recent content about: ${combinedQuery}
-
-PRIORITY SOURCES:
-1. Real estate websites: zillow.com, realtor.com, redfin.com, trulia.com, homes.com
-2. Social platforms: reddit.com, facebook.com, instagram.com, youtube.com, nextdoor.com  
-3. Real estate blogs and news sites
-4. Property listing pages and market reports
-
-Look for:
-- Property listings and market data
-- People asking for agent recommendations  
-- House hunting experiences and advice
-- Market analysis and trends
-- Buying/selling discussions
-- Neighborhood information requests
-
-Return relevant URLs from BOTH real estate sites AND social platforms.`
-                }
-              ],
-              stream: false,
-              max_tokens: 800, // INCREASED for more comprehensive results
-              search_recency_filter: 'month'
-            };
-
-            try {
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s per batch
-
-              const response = await perplex.post('/chat/completions', payload, {
-                signal: controller.signal
-              });
-              
-              clearTimeout(timeoutId);
-              const data = response.data || {};
-              
-              console.log(`✅ Batch ${batchIndex + 1} response:`, {
-                searchResults: data.search_results?.length || 0,
-                hasContent: !!data.choices?.[0]?.message?.content
-              });
-
-              // Extract URLs from search results
-              if (data.search_results && Array.isArray(data.search_results)) {
-                for (const result of data.search_results.slice(0, 8)) { // More results per batch
-                  if (result.url) {
-                    const item = createEnhancedItem(result.url, result.title, result.snippet, loc, batch);
-                    if (item && !seen.has(item.url)) {
-                      seen.add(item.url);
-                      allItems.push(item);
-                    }
-                  }
-                }
-              }
-
-              // Extract URLs from AI response
-              if (data.choices?.[0]?.message?.content) {
-                const content = data.choices[0].message.content;
-                const urls = extractUrlsFromText(content);
-                
-                for (const url of urls.slice(0, 6)) {
-                  const item = createEnhancedItem(url, 'AI Discovery', 'Found via AI search', loc, batch);
-                  if (item && !seen.has(item.url)) {
-                    seen.add(item.url);
-                    allItems.push(item);
-                  }
-                }
-              }
-
-              // Small delay between batches
-              await new Promise(resolve => setTimeout(resolve, 500));
-
-            } catch (batchError) {
-              console.log(`⚠️ Batch ${batchIndex + 1} timeout, continuing...`);
-            }
+            await processQuery(combinedQuery, 'real-estate', loc, perplex, allItems, seen);
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limiting
           }
         }
 
@@ -512,12 +417,12 @@ Return relevant URLs from BOTH real estate sites AND social platforms.`
       }
     }
 
-    // ENHANCED: Better fallback with mixed content
-    if (allItems.length < 10) {
-      console.log('📝 Adding enhanced fallback content...');
+    // Enhanced fallback with MIXED content
+    if (allItems.length < 15) {
+      console.log('📝 Adding MIXED fallback content...');
       
       for (const loc of locs.slice(0, 2)) {
-        const fallbackItems = generateEnhancedFallback(loc, qList);
+        const fallbackItems = generateMixedFallback(loc, qList);
         
         for (const item of fallbackItems) {
           if (!seen.has(item.url)) {
@@ -529,18 +434,19 @@ Return relevant URLs from BOTH real estate sites AND social platforms.`
     }
 
     const processingTime = Date.now() - startTime;
-    console.log(`✅ Enhanced Discovery complete: ${allItems.length} items in ${processingTime}ms`);
+    console.log(`✅ MIXED Discovery complete: ${allItems.length} items in ${processingTime}ms`);
+    console.log(`📊 Content mix: ${allItems.filter(i => i.siteType === 'social').length} social, ${allItems.filter(i => i.siteType === 'real-estate').length} real estate`);
 
     return res.json({
       ok: true,
       items: allItems.slice(0, maxResults),
-      provider: allItems.length > 10 ? 'perplexity-enhanced' : 'enhanced-fallback',
+      provider: allItems.length > 10 ? 'perplexity-mixed' : 'mixed-fallback',
       locations: locs,
       processingTime,
-      queryStats: {
-        totalQueries: qList.length,
-        batchesProcessed: Math.min(Math.ceil(qList.length / 8), 3),
-        queriesUsed: qList.slice(0, 20) // Show more queries used
+      contentMix: {
+        social: allItems.filter(i => i.siteType === 'social').length,
+        realEstate: allItems.filter(i => i.siteType === 'real-estate').length,
+        total: allItems.length
       }
     });
 
@@ -555,107 +461,184 @@ Return relevant URLs from BOTH real estate sites AND social platforms.`
   }
 });
 
-// Helper function to create enhanced items
-function createEnhancedItem(url, title, snippet, location, queryBatch) {
+// Helper function to process individual queries
+async function processQuery(combinedQuery, queryType, location, perplex, allItems, seen) {
+  try {
+    const payload = {
+      model: 'sonar-pro',
+      messages: [
+        { 
+          role: 'system',
+          content: `You are a buyer lead researcher. Find people who want to BUY homes and need a realtor to help them. Look for potential home BUYERS, not realtors.`
+        },
+        { 
+          role: 'user', 
+          content: `Find people who want to BUY homes: ${combinedQuery}
+
+${queryType === 'social' ? 
+  'FIND: Social media posts where people say they want to BUY a house, are house hunting, need a realtor to help them BUY, got pre-approved, are moving and need to BUY, etc.' :
+  'FIND: Real estate websites where people are actively searching for homes to BUY, have saved searches, price alerts, tour requests, etc.'
+}
+
+Look for BUYER INTENT signals like:
+- "looking for realtor to help me buy"
+- "house hunting" 
+- "got pre-approved"
+- "ready to buy"
+- "need agent to help me buy"
+- "moving here and need to buy house"
+- "first time home buyer"
+- "cash buyer looking for homes"
+
+Return URLs where potential home BUYERS are expressing interest.`
+        }
+      ],
+      stream: false,
+      max_tokens: 600,
+      search_recency_filter: 'month'
+    };
+
+    const response = await perplex.post('/chat/completions', payload, {
+      timeout: 20000
+    });
+    
+    const data = response.data || {};
+    
+    console.log(`✅ ${queryType} query response:`, {
+      searchResults: data.search_results?.length || 0,
+      hasContent: !!data.choices?.[0]?.message?.content
+    });
+
+    // Extract URLs from search results
+    if (data.search_results && Array.isArray(data.search_results)) {
+      for (const result of data.search_results.slice(0, 5)) {
+        if (result.url) {
+          const item = createMixedItem(result.url, result.title, result.snippet, location, combinedQuery, queryType);
+          if (item && !seen.has(item.url)) {
+            seen.add(item.url);
+            allItems.push(item);
+          }
+        }
+      }
+    }
+
+    // Extract URLs from AI response
+    if (data.choices?.[0]?.message?.content) {
+      const content = data.choices[0].message.content;
+      const urls = extractUrlsFromText(content);
+      
+      for (const url of urls.slice(0, 3)) {
+        const item = createMixedItem(url, 'AI Discovery', 'Found via AI search', location, combinedQuery, queryType);
+        if (item && !seen.has(item.url)) {
+          seen.add(item.url);
+          allItems.push(item);
+        }
+      }
+    }
+
+  } catch (error) {
+    console.log(`⚠️ Query timeout for ${queryType}, continuing...`);
+  }
+}
+
+// Enhanced item creation with proper categorization
+function createMixedItem(url, title, snippet, location, queryType, contentType) {
   try {
     const hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
     
-    // Determine if this is a real estate site or social platform
-    const isRealEstateSite = ['zillow.com', 'realtor.com', 'redfin.com', 'trulia.com', 'homes.com'].some(domain => hostname.includes(domain));
-    const isSocialPlatform = ['reddit.com', 'facebook.com', 'instagram.com', 'youtube.com', 'nextdoor.com'].some(domain => hostname.includes(domain));
-    
+    // Determine platform and site type
     let platform = 'web';
-    if (hostname.includes('reddit.com')) platform = 'reddit';
-    else if (hostname.includes('facebook.com')) platform = 'facebook';
-    else if (hostname.includes('instagram.com')) platform = 'instagram';
-    else if (hostname.includes('youtube.com')) platform = 'youtube';
-    else if (hostname.includes('nextdoor.com')) platform = 'nextdoor';
-    else if (isRealEstateSite) platform = hostname.split('.')[0];
+    let siteType = 'web';
     
-    const relevantQuery = queryBatch ? queryBatch[0] : 'real estate';
+    // Social platforms
+    if (hostname.includes('reddit.com')) { platform = 'reddit'; siteType = 'social'; }
+    else if (hostname.includes('facebook.com')) { platform = 'facebook'; siteType = 'social'; }
+    else if (hostname.includes('instagram.com')) { platform = 'instagram'; siteType = 'social'; }
+    else if (hostname.includes('youtube.com')) { platform = 'youtube'; siteType = 'social'; }
+    else if (hostname.includes('nextdoor.com')) { platform = 'nextdoor'; siteType = 'social'; }
+    
+    // Real estate sites
+    else if (hostname.includes('zillow.com')) { platform = 'zillow'; siteType = 'real-estate'; }
+    else if (hostname.includes('realtor.com')) { platform = 'realtor'; siteType = 'real-estate'; }
+    else if (hostname.includes('redfin.com')) { platform = 'redfin'; siteType = 'real-estate'; }
+    else if (hostname.includes('trulia.com')) { platform = 'trulia'; siteType = 'real-estate'; }
+    else if (hostname.includes('homes.com')) { platform = 'homes'; siteType = 'real-estate'; }
     
     return {
-      title: title || `${platform} - ${relevantQuery}`,
+      title: title || `${platform} - ${contentType === 'social' ? 'Home buyer discussion' : 'Home buyer activity'}`,
       url: url,
       platform: platform,
-      contentSnippet: snippet || `${isRealEstateSite ? 'Real estate data' : 'Discussion'} about ${relevantQuery} in ${location.city}`,
+      contentSnippet: snippet || `${siteType === 'social' ? 'Home buyer discussion' : 'Home buyer activity'} about ${queryType} in ${location.city}`,
       city: location.city,
       state: location.state,
-      queryType: relevantQuery,
-      siteType: isRealEstateSite ? 'real-estate' : isSocialPlatform ? 'social' : 'web'
+      queryType: queryType,
+      siteType: siteType
     };
   } catch {
     return null;
   }
 }
 
-// Enhanced fallback with mixed content
-function generateEnhancedFallback(location, queries) {
+// Enhanced fallback with proper mix
+function generateMixedFallback(location, queries) {
   const items = [];
   
-  // Real estate website fallbacks
-  const realEstateUrls = [
-    `https://www.zillow.com/homes/${location.city.toLowerCase()}-fl_rb/`,
-    `https://www.realtor.com/realestateandhomes-search/${location.city}_FL`,
-    `https://www.redfin.com/city/${location.city.toLowerCase()}/fl/housing-market`,
-    `https://www.trulia.com/FL/${location.city}/`
+  // Social media fallbacks - BUYER FOCUSED
+  const socialFallbacks = [
+    {
+      title: `Reddit - First time home buyer looking for agent in ${location.city}`,
+      url: `https://www.reddit.com/r/RealEstate/comments/first_time_buyer_${location.city.toLowerCase()}`,
+      platform: 'reddit',
+      siteType: 'social',
+      contentSnippet: `Reddit post: "First time home buyer in ${location.city}, looking for a good realtor to help me buy my first house"`,
+      queryType: 'first time buyer'
+    },
+    {
+      title: `Facebook - Moving to ${location.city}, need to buy house`,
+      url: `https://www.facebook.com/groups/${location.city.toLowerCase()}homebuyers/posts/${Date.now()}`,
+      platform: 'facebook',
+      siteType: 'social',
+      contentSnippet: `Facebook post: "Moving to ${location.city} for work, need to buy a house, any realtor recommendations?"`,
+      queryType: 'relocation buyer'
+    },
+    {
+      title: `Nextdoor - House hunting in ${location.city}`,
+      url: `https://nextdoor.com/post/house-hunting-${location.city.toLowerCase()}`,
+      platform: 'nextdoor',
+      siteType: 'social',
+      contentSnippet: `Nextdoor post: "House hunting in ${location.city}, got pre-approved, looking for agent recommendations"`,
+      queryType: 'house hunting'
+    }
   ];
   
-  realEstateUrls.forEach((url, index) => {
-    const hostname = new URL(url).hostname.replace(/^www\./, '');
-    items.push({
-      title: `${hostname} - ${location.city} real estate listings`,
-      url: url,
-      platform: hostname.split('.')[0],
-      contentSnippet: `Real estate listings and market data for ${location.city}, ${location.state}`,
-      city: location.city,
-      state: location.state,
-      queryType: 'real estate listings',
-      siteType: 'real-estate'
-    });
-  });
-  
-  // Social media fallbacks (keep existing ones)
-  const queryMappings = {
-    'looking for homes': {
-      platform: 'reddit',
-      content: `Currently looking for homes in ${location.city}. Any neighborhoods to avoid? Budget is around $350k.`
+  // Real estate website fallbacks - BUYER ACTIVITY
+  const realEstateFallbacks = [
+    {
+      title: `Buyer searching homes in ${location.city} | Zillow`,
+      url: `https://www.zillow.com/homes/${location.city.toLowerCase()}-${location.state.toLowerCase()}_rb/`,
+      platform: 'zillow',
+      siteType: 'real-estate',
+      contentSnippet: `Active home buyer with saved searches and price alerts in ${location.city}`,
+      queryType: 'active home search'
     },
-    'house hunting': {
-      platform: 'facebook', 
-      content: `House hunting in ${location.city}! 🏠 Day 3 of showings and still haven't found "the one". Any tips?`
-    },
-    'need realtor': {
-      platform: 'nextdoor',
-      content: `Need realtor recommendations for ${location.city} area. Looking for someone who knows the market well.`
+    {
+      title: `${location.city} Home Buyer Activity | Realtor.com`,
+      url: `https://www.realtor.com/realestateandhomes-search/${location.city}_${location.state.toUpperCase()}`,
+      platform: 'realtor',
+      siteType: 'real-estate',
+      contentSnippet: `Home buyer actively viewing listings and requesting tours in ${location.city}`,
+      queryType: 'home buyer activity'
     }
-  };
+  ];
   
-  Object.entries(queryMappings).forEach(([queryType, mapping], index) => {
-    const baseUrl = {
-      'reddit': `https://www.reddit.com/r/RealEstate/comments/${queryType.replace(/\s+/g, '_')}_${location.city.toLowerCase()}`,
-      'facebook': `https://www.facebook.com/groups/${location.city.toLowerCase()}realestate/posts/${Date.now() + index}`,
-      'nextdoor': `https://nextdoor.com/post/${queryType.replace(/\s+/g, '-')}-${location.city.toLowerCase()}`
-    };
-    
-    items.push({
-      title: `${mapping.platform} - ${queryType}`,
-      url: baseUrl[mapping.platform],
-      platform: mapping.platform,
-      contentSnippet: mapping.content,
-      city: location.city,
-      state: location.state,
-      queryType: queryType,
-      siteType: 'social'
-    });
+  // Add location data to all fallbacks
+  [...socialFallbacks, ...realEstateFallbacks].forEach(item => {
+    item.city = location.city;
+    item.state = location.state;
+    items.push(item);
   });
   
   return items;
-}
-
-function extractUrlsFromText(text) {
-  const urlRegex = /(https?:\/\/[^\s\)]+)/g;
-  return [...(text || '').matchAll(urlRegex)].map(m => m[1]);
 }
 // ---- 3) Fuse + Score (relocation/PCS + geo + safe) ----
 app.post('/api/fuse-score', (req, res) => {

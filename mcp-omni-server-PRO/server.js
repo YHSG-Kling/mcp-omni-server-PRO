@@ -107,161 +107,252 @@ app.get('/routes', (_req, res) => {
     res.json({ ok: false, error: String(e?.message || e) });
   }
 });
-// ---- Scrape a list of URLs (quota-friendly, chunked, graceful fallback) ----
+// ADD THIS TO YOUR server.js - REPLACE YOUR EXISTING /api/scrape ENDPOINT
+
 app.post('/api/scrape', async (req, res) => {
   try {
-    const apify = client('apify'); // uses APIFY_TOKEN if set
-
-    // Normalize input: accept urls[] or scrapeUrls/socialUrls/holdUrls
+    const apify = client('apify');
+    
+    // Get URL lists from request
     const body = req.body || {};
-    let list = [];
-    if (Array.isArray(body.urls) && body.urls.length) list = body.urls;
-    else if (Array.isArray(body.scrapeUrls) && body.scrapeUrls.length) list = body.scrapeUrls;
-    else if (Array.isArray(body.socialUrls) && body.socialUrls.length) list = body.socialUrls;
-    else if (Array.isArray(body.holdUrls) && body.holdUrls.length) list = body.holdUrls;
-
-    // Sanitize + dedupe
-    list = [...new Set((list || []).filter(u => typeof u === 'string' && /^https?:\/\//i.test(u)))];
-    if (!list.length) return res.status(400).json({ ok: false, error: 'urls[] required' });
-
-    // Optional geo context passthrough for scoring
-    const cityMap  = body.urlCityMap  || {};
+    let scrapeUrls = body.scrapeUrls || [];
+    let socialUrls = body.socialUrls || body.holdUrls || [];
+    
+    // City/state mapping
+    const cityMap = body.urlCityMap || {};
     const stateMap = body.urlStateMap || {};
-
-    // Hosts we don't hard-scrape (keep placeholders so n8n routing continues)
-    const hardHosts = ['instagram.com', 'm.facebook.com', 'facebook.com', 'nextdoor.com'];
-    const isHard = (u) => {
+    
+    console.log('📊 Scrape request:', {
+      scrapeUrls: scrapeUrls.length,
+      socialUrls: socialUrls.length,
+      totalUrls: scrapeUrls.length + socialUrls.length
+    });
+    
+    const items = [];
+    
+    // ENHANCED: Process scrape URLs (real estate sites, news, etc.)
+    for (const url of scrapeUrls.slice(0, 20)) {
       try {
-        const h = new URL(u).hostname.replace(/^www\./, '');
-        return hardHosts.some(d => h === d || h.endsWith('.' + d));
-      } catch { return false; }
-    };
-    const hard = list.filter(isHard);
-    const easy = list.filter(u => !isHard(u));
-
-    let items = [];
-
-    // === Apify chunked runs (low memory) ===
-    // Tunables via env if you want: APIFY_MEMORY, APIFY_TIMEOUT_SEC, APIFY_MAX_CONCURRENCY, APIFY_CHUNK_SIZE
-    const CHUNK_SIZE        = Math.max(1, Number(process.env.APIFY_CHUNK_SIZE || 6));
-    const MEMORY_MB         = Math.max(256, Number(process.env.APIFY_MEMORY || 1024));   // 512–1024 recommended on free tier
-    const TIMEOUT_SEC       = Math.max(60,  Number(process.env.APIFY_TIMEOUT_SEC || 120));
-    const MAX_CONCURRENCY   = Math.max(1,   Number(process.env.APIFY_MAX_CONCURRENCY || 3));
-    const MAX_RETRIES       = 2;
-
-    async function runApifyChunk(urlsChunk) {
-      const input = {
-        startUrls: urlsChunk.map(u => ({ url: u })),
-        maxRequestsPerCrawl: urlsChunk.length,
-        useChrome: true,
-        stealth: true,
-        proxyConfiguration: { useApifyProxy: true },
-        maxConcurrency: MAX_CONCURRENCY,
-        maxRequestRetries: MAX_RETRIES,
-        navigationTimeoutSecs: 45,
-        pageFunction: `
-          async function pageFunction(context) {
-            const { request, log } = context;
-            const title = document.title || '';
-            let text = '';
-            try { text = document.body ? document.body.innerText : ''; } catch (e) { log.debug('text-read failed'); }
-            return { url: request.url, title, content: (text || '').slice(0, 20000) };
+        if (!url || !url.startsWith('http')) continue;
+        
+        console.log('🔍 Scraping:', url);
+        
+        // Try Apify first for complex sites
+        if (apify && shouldUseApify(url)) {
+          const apifyResult = await runApifyScrape(apify, [url]);
+          if (apifyResult && apifyResult.length > 0) {
+            items.push(...apifyResult.map(item => ({
+              ...item,
+              city: cityMap[url] || item.city || '',
+              state: stateMap[url] || item.state || ''
+            })));
+            continue;
           }
-        `,
-      };
-
-      // IMPORTANT: set memory + timeout via query params so we don’t exceed your quota
-      const start = await apify.post(
-        `/v2/acts/apify~web-scraper/runs?memory=${MEMORY_MB}&timeout=${TIMEOUT_SEC}`,
-        input
-      );
-      const runId = start?.data?.data?.id;
-      if (!runId) throw new Error('No Apify run id from /runs');
-
-      // Poll for completion
-      const wait = (ms) => new Promise(r => setTimeout(r, ms));
-      let status = 'RUNNING', datasetId = null, tries = 0;
-      while (tries < 25) {
-        const st = await apify.get(`/v2/actor-runs/${runId}`);
-        status    = st?.data?.data?.status;
-        datasetId = st?.data?.data?.defaultDatasetId;
-        if (status === 'SUCCEEDED' && datasetId) break;
-        if (['FAILED','ABORTED','TIMED_OUT'].includes(status)) throw new Error(`Apify run ${status}`);
-        await wait(1500); tries++;
+        }
+        
+        // Fallback to direct scraping
+        const directResult = await directScrape(url);
+        items.push({
+          ...directResult,
+          city: cityMap[url] || '',
+          state: stateMap[url] || ''
+        });
+        
+      } catch (error) {
+        console.error('❌ Scrape error for', url, ':', error.message);
+        // Still add placeholder to maintain URL context
+        items.push({
+          url: url,
+          title: 'Scraping Error',
+          content: `Unable to scrape content: ${error.message}`,
+          city: cityMap[url] || '',
+          state: stateMap[url] || ''
+        });
       }
-
-      if (status === 'SUCCEEDED' && datasetId) {
-        const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
-        const raw = Array.isArray(resp.data) ? resp.data : [];
-        const seen = new Set();
-        return raw
-          .map(r => ({ url: r.url, title: r.title || '', content: r.content || '' }))
-          .filter(it => it.url && !seen.has(it.url) && seen.add(it.url));
-      }
-      return [];
     }
-
-    // Try Apify if token present and we have any easy URLs
-    if (apify && easy.length) {
+    
+    // ENHANCED: Handle social URLs differently 
+    for (const url of socialUrls.slice(0, 30)) {
       try {
-        for (let i = 0; i < easy.length; i += CHUNK_SIZE) {
-          const chunk = easy.slice(i, i + CHUNK_SIZE);
-          const got = await runApifyChunk(chunk);
-          items.push(...got);
-        }
-      } catch (e) {
-        // If Apify throws (e.g., memory limit), log and continue to fallback
-        console.error('[scrape] Apify error; continuing to fallback:', e?.response?.data || e.message);
+        const platform = detectPlatform(url);
+        
+        // Social media URLs get placeholder content with platform detection
+        items.push({
+          url: url,
+          title: `${platform.charAt(0).toUpperCase() + platform.slice(1)} Post`,
+          content: `Social media content detected on ${platform}. Use comments endpoint for detailed extraction.`,
+          platform: platform,
+          needsComments: true,
+          city: cityMap[url] || '',
+          state: stateMap[url] || '',
+          socialPlaceholder: true
+        });
+        
+      } catch (error) {
+        console.error('❌ Social URL error:', error.message);
+        items.push({
+          url: url,
+          title: 'Social Media Content',
+          content: 'Social media content requires special processing',
+          city: cityMap[url] || '',
+          state: stateMap[url] || ''
+        });
       }
     }
-
-    // Add placeholders for hard hosts so downstream keeps URL/geo context
-    for (const u of hard) items.push({ url: u, title: '', content: '' });
-
-    // === Fallback Node GET for any easy URLs we didn’t get via Apify ===
-    if (easy.length) {
-      const already = new Set(items.map(i => i.url));
-      const fallbackTargets = easy.filter(u => !already.has(u));
-
-      for (const u of fallbackTargets) {
-        try {
-          const r = await axios.get(u, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-          const html = String(r.data || '');
-          const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-          const title = titleMatch ? titleMatch[1] : '';
-          const text = html
-            .replace(/<script[\s\S]*?<\/script>/gi, '')
-            .replace(/<style[\s\S]*?<\/style>/gi, '')
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          items.push({ url: u, title, content: text.slice(0, 20000) });
-        } catch {
-          items.push({ url: u, title: '', content: '' });
-        }
-      }
-    }
-
-    // Attach geo maps (helps your scoring when page text is thin)
-    items = items.map(it => ({
-      ...it,
-      city:  cityMap[it.url]  || it.city  || null,
-      state: stateMap[it.url] || it.state || null,
-    }));
-
+    
+    console.log('✅ Scrape complete:', {
+      totalItems: items.length,
+      scrapeItems: items.filter(i => !i.socialPlaceholder).length,
+      socialItems: items.filter(i => i.socialPlaceholder).length
+    });
+    
     return res.json({
       ok: true,
-      items,
-      provider: apify ? 'apify|fallback' : 'fallback',
-      note: hard.length ? 'Some hosts returned placeholders (IG/FB/Nextdoor).' : undefined
+      items: items,
+      provider: apify ? 'apify-enhanced' : 'direct-enhanced',
+      stats: {
+        scraped: items.filter(i => !i.socialPlaceholder).length,
+        social: items.filter(i => i.socialPlaceholder).length,
+        total: items.length
+      }
     });
-  } catch (e) {
-    console.error('scrape fatal:', e?.response?.data || e.message);
-    // Never 500 to n8n—return ok:true with zero items so your flow keeps going
-    return res.status(200).json({ ok: true, items: [], provider: 'none', warning: 'scrape failed' });
+    
+  } catch (error) {
+    console.error('💥 Scrape endpoint error:', error);
+    return res.status(200).json({ 
+      ok: true, 
+      items: [], 
+      provider: 'error-fallback',
+      error: error.message 
+    });
   }
 });
 
+// HELPER FUNCTIONS - ADD THESE TOO
+
+function shouldUseApify(url) {
+  const apifyDomains = [
+    'zillow.com', 'realtor.com', 'redfin.com', 'trulia.com',
+    'homes.com', 'uhaul.com', 'apartments.com'
+  ];
+  
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    return apifyDomains.some(domain => hostname.includes(domain));
+  } catch {
+    return false;
+  }
+}
+
+async function runApifyScrape(apify, urls) {
+  try {
+    const input = {
+      startUrls: urls.map(u => ({ url: u })),
+      maxRequestsPerCrawl: urls.length,
+      useChrome: true,
+      stealth: true,
+      proxyConfiguration: { useApifyProxy: true },
+      maxConcurrency: 2,
+      navigationTimeoutSecs: 30,
+      pageFunction: `
+        async function pageFunction(context) {
+          const { request } = context;
+          const title = document.title || '';
+          let text = '';
+          try { 
+            text = document.body ? document.body.innerText : ''; 
+          } catch (e) { 
+            text = ''; 
+          }
+          return { 
+            url: request.url, 
+            title: title, 
+            content: (text || '').slice(0, 15000) 
+          };
+        }
+      `
+    };
+
+    const run = await apify.post('/v2/acts/apify~web-scraper/runs?memory=512&timeout=90', input);
+    const runId = run?.data?.data?.id;
+    
+    if (!runId) return null;
+
+    // Poll for completion
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    let status = 'RUNNING', datasetId = null, tries = 0;
+    
+    while (tries < 20) {
+      const st = await apify.get(`/v2/actor-runs/${runId}`);
+      status = st?.data?.data?.status;
+      datasetId = st?.data?.data?.defaultDatasetId;
+      if (status === 'SUCCEEDED' && datasetId) break;
+      if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) break;
+      await wait(2000);
+      tries++;
+    }
+
+    if (status === 'SUCCEEDED' && datasetId) {
+      const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+      return Array.isArray(resp.data) ? resp.data : [];
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Apify scrape error:', error.message);
+    return null;
+  }
+}
+
+async function directScrape(url) {
+  try {
+    const response = await axios.get(url, { 
+      timeout: 15000,
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' 
+      }
+    });
+    
+    const html = String(response.data || '');
+    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    const title = titleMatch ? titleMatch[1].trim() : '';
+    
+    // Extract text content
+    const text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    return {
+      url: url,
+      title: title,
+      content: text.slice(0, 15000)
+    };
+  } catch (error) {
+    return {
+      url: url,
+      title: 'Direct Scrape Error',
+      content: `Failed to scrape: ${error.message}`
+    };
+  }
+}
+
+function detectPlatform(url) {
+  if (!url) return 'unknown';
+  const urlLower = url.toLowerCase();
+  
+  if (urlLower.includes('instagram.com')) return 'instagram';
+  if (urlLower.includes('facebook.com')) return 'facebook';
+  if (urlLower.includes('nextdoor.com')) return 'nextdoor';
+  if (urlLower.includes('reddit.com')) return 'reddit';
+  if (urlLower.includes('youtube.com') || urlLower.includes('youtu.be')) return 'youtube';
+  if (urlLower.includes('tiktok.com')) return 'tiktok';
+  if (urlLower.includes('twitter.com') || urlLower.includes('x.com')) return 'twitter';
+  
+  return 'web';
+}
 
 // REPLACE your /api/discover endpoint with this EFFICIENT version that handles ALL your queries:
 

@@ -107,69 +107,154 @@ app.get('/routes', (_req, res) => {
     res.json({ ok: false, error: String(e?.message || e) });
   }
 });
-// ADD THIS TO YOUR server.js - REPLACE YOUR EXISTING /api/scrape ENDPOINT
-
-app.post('/api/scrape', async (req, res) => {
+async function runApifyScrape(apify, urls) {
   try {
-    const apify = client('apify');
+    // Determine which actor to use based on the URL
+    const firstUrl = urls[0];
+    const hostname = new URL(firstUrl).hostname.replace(/^www\./, '');
     
-    // Get URL lists from request
-    const body = req.body || {};
-    let scrapeUrls = body.scrapeUrls || [];
-    let socialUrls = body.socialUrls || body.holdUrls || [];
+    let actorId, input;
+}
+    // In your /api/scrape endpoint, around line 110
+if (apify && shouldUseApify(url)) {
+  const apifyResult = await runApifyScrape(apify, [url]);
+  if (apifyResult && apifyResult.length > 0) {
+    const platform = getPlatformFromUrl(url);
     
-    // City/state mapping
-    const cityMap = body.urlCityMap || {};
-    const stateMap = body.urlStateMap || {};
-    
-    console.log('📊 Scrape request:', {
-      scrapeUrls: scrapeUrls.length,
-      socialUrls: socialUrls.length,
-      totalUrls: scrapeUrls.length + socialUrls.length
-    });
-    
-    const items = [];
-    
-    // ENHANCED: Process scrape URLs (real estate sites, news, etc.)
-    for (const url of scrapeUrls.slice(0, 20)) {
-      try {
-        if (!url || !url.startsWith('http')) continue;
-        
-        console.log('🔍 Scraping:', url);
-        
-        // Try Apify first for complex sites
-        if (apify && shouldUseApify(url)) {
-          const apifyResult = await runApifyScrape(apify, [url]);
-          if (apifyResult && apifyResult.length > 0) {
-            items.push(...apifyResult.map(item => ({
-              ...item,
-              city: cityMap[url] || item.city || '',
-              state: stateMap[url] || item.state || ''
-            })));
-            continue;
-          }
-        }
-        
-        // Fallback to direct scraping
-        const directResult = await directScrape(url);
-        items.push({
-          ...directResult,
-          city: cityMap[url] || '',
-          state: stateMap[url] || ''
-        });
-        
-      } catch (error) {
-        console.error('❌ Scrape error for', url, ':', error.message);
-        // Still add placeholder to maintain URL context
-        items.push({
-          url: url,
-          title: 'Scraping Error',
-          content: `Unable to scrape content: ${error.message}`,
-          city: cityMap[url] || '',
-          state: stateMap[url] || ''
-        });
+    items.push(...apifyResult.map(item => {
+      // Apply platform-specific enhancements
+      if (platform === 'zillow') {
+        return enhanceZillowData(item, url);
       }
+      return {
+        ...item,
+        city: cityMap[url] || item.city || '',
+        state: stateMap[url] || item.state || '',
+        platform: platform
+      };
+    }));
+    continue;
+  }
+}
+    if (hostname.includes('zillow.com')) {
+      // Use Zillow-specific actor
+      actorId = 'dtrungtin~zillow-scraper';
+      input = {
+        startUrls: urls.map(u => ({ url: u })),
+        maxItems: urls.length * 20, // Get more listings per URL
+        extendOutputFunction: `($) => {
+          return {
+            listingCount: $('.list-card').length,
+            marketData: $('.zsg-tooltip-content').text(),
+            priceHistory: $('.price-history-table').text()
+          };
+        }`,
+        proxyConfiguration: { useApifyProxy: true, groups: ['RESIDENTIAL'] },
+        maxConcurrency: 1 // Slower to avoid detection
+      };
+    } else if (hostname.includes('realtor.com')) {
+      // Use Realtor-specific actor  
+      actorId = 'tugkan~realtor-scraper';
+      input = {
+        startUrls: urls.map(u => ({ url: u })),
+        maxItems: urls.length * 10,
+        proxyConfiguration: { useApifyProxy: true }
+      };
+    } else if (hostname.includes('redfin.com')) {
+      // Use generic scraper for Redfin (usually works)
+      actorId = 'apify~web-scraper';
+      input = {
+        startUrls: urls.map(u => ({ url: u })),
+        maxRequestsPerCrawl: urls.length,
+        useChrome: true,
+        stealth: true,
+        proxyConfiguration: { useApifyProxy: true },
+        maxConcurrency: 1,
+        pageFunction: `
+          async function pageFunction(context) {
+            const { request } = context;
+            const title = document.title || '';
+            
+            // Redfin-specific data extraction
+            const redfinData = {
+              listings: Array.from(document.querySelectorAll('.HomeCard')).length,
+              marketStats: document.querySelector('.market-insights')?.textContent || '',
+              recentSales: document.querySelector('.recent-sales')?.textContent || ''
+            };
+            
+            return { 
+              url: request.url, 
+              title: title, 
+              content: JSON.stringify(redfinData),
+              platform: 'redfin'
+            };
+          }
+        `
+      };
+    } else {
+      // Fallback to generic scraper
+      actorId = 'apify~web-scraper';
+      input = {
+        startUrls: urls.map(u => ({ url: u })),
+        maxRequestsPerCrawl: urls.length,
+        useChrome: true,
+        stealth: true,
+        proxyConfiguration: { useApifyProxy: true },
+        maxConcurrency: 2,
+        navigationTimeoutSecs: 30,
+        pageFunction: `
+          async function pageFunction(context) {
+            const { request } = context;
+            const title = document.title || '';
+            let text = '';
+            try { 
+              text = document.body ? document.body.innerText : ''; 
+            } catch (e) { 
+              text = ''; 
+            }
+            return { 
+              url: request.url, 
+              title: title, 
+              content: (text || '').slice(0, 15000) 
+            };
+          }
+        `
+      };
     }
+
+    console.log(`Using actor: ${actorId} for ${hostname}`);
+    
+    // Make the API call with the selected actor
+    const run = await apify.post(`/v2/acts/${actorId}/runs?memory=1024&timeout=180`, input);
+    const runId = run?.data?.data?.id;
+    
+    if (!runId) return null;
+
+    // Rest of your existing polling logic...
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    let status = 'RUNNING', datasetId = null, tries = 0;
+    
+    while (tries < 30) { // Increased tries for Zillow
+      const st = await apify.get(`/v2/actor-runs/${runId}`);
+      status = st?.data?.data?.status;
+      datasetId = st?.data?.data?.defaultDatasetId;
+      if (status === 'SUCCEEDED' && datasetId) break;
+      if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(status)) break;
+      await wait(3000); // Longer wait for complex scraping
+      tries++;
+    }
+
+    if (status === 'SUCCEEDED' && datasetId) {
+      const resp = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json`);
+      return Array.isArray(resp.data) ? resp.data : [];
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Apify scrape error:', error.message);
+    return null;
+  }
+}
     
     // ENHANCED: Handle social URLs differently 
     for (const url of socialUrls.slice(0, 30)) {
@@ -233,7 +318,7 @@ app.post('/api/scrape', async (req, res) => {
 function shouldUseApify(url) {
   const apifyDomains = [
     'zillow.com', 'realtor.com', 'redfin.com', 'trulia.com',
-    'homes.com', 'uhaul.com', 'apartments.com'
+    'homes.com' // Removed uhaul.com and apartments.com as they're not real estate
   ];
   
   try {
@@ -244,6 +329,62 @@ function shouldUseApify(url) {
   }
 }
 
+// Add this helper function
+function getPlatformFromUrl(url) {
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    if (hostname.includes('zillow.com')) return 'zillow';
+    if (hostname.includes('realtor.com')) return 'realtor';
+    if (hostname.includes('redfin.com')) return 'redfin';
+    if (hostname.includes('trulia.com')) return 'trulia';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+function enhanceZillowData(rawData, url) {
+  try {
+    // Parse Zillow-specific data
+    const content = rawData.content || rawData.text || '';
+    
+    // Extract Zillow-specific buyer intent signals
+    const zillowSignals = [];
+    
+    if (content.includes('Recently Sold') || content.includes('Sold ')) {
+      zillowSignals.push('recent-sales-data');
+    }
+    
+    if (content.includes('Price History') || content.includes('price reduced')) {
+      zillowSignals.push('price-tracking');
+    }
+    
+    if (content.includes('Save') || content.includes('Favorite')) {
+      zillowSignals.push('save-functionality');
+    }
+    
+    if (content.includes('Contact Agent') || content.includes('Tour')) {
+      zillowSignals.push('contact-opportunity');
+    }
+    
+    // Calculate Zillow-specific intent score
+    let intentScore = 4; // Base score for Zillow page
+    intentScore += zillowSignals.length;
+    
+    if (url.includes('/homedetails/')) intentScore += 2; // Specific property
+    if (url.includes('/homes/')) intentScore += 1; // Search results
+    
+    return {
+      ...rawData,
+      content: content,
+      platform: 'zillow',
+      zillowSignals: zillowSignals,
+      enhancedIntentScore: Math.min(10, intentScore),
+      zillowEnhanced: true
+    };
+  } catch (error) {
+    return rawData;
+  }
+}
 async function runApifyScrape(apify, urls) {
   try {
     const input = {

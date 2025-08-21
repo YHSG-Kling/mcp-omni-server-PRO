@@ -332,44 +332,7 @@ function getPlatformFromUrl(url) {
     return 'unknown';
   }
 }
-    // Extract Zillow-specific buyer intent signals
-    const zillowSignals = [];
-    
-    if (content.includes('Recently Sold') || content.includes('Sold ')) {
-      zillowSignals.push('recent-sales-data');
-    }
-    
-    if (content.includes('Price History') || content.includes('price reduced')) {
-      zillowSignals.push('price-tracking');
-    }
-    
-    if (content.includes('Save') || content.includes('Favorite')) {
-      zillowSignals.push('save-functionality');
-    }
-    
-    if (content.includes('Contact Agent') || content.includes('Tour')) {
-      zillowSignals.push('contact-opportunity');
-    }
-    
-    // Calculate Zillow-specific intent score
-    let intentScore = 4; // Base score for Zillow page
-    intentScore += zillowSignals.length;
-    
-    if (url.includes('/homedetails/')) intentScore += 2; // Specific property
-    if (url.includes('/homes/')) intentScore += 1; // Search results
-    
-    return {
-      ...rawData,
-      content: content,
-      platform: 'zillow',
-      zillowSignals: zillowSignals,
-      enhancedIntentScore: Math.min(10, intentScore),
-      zillowEnhanced: true
-    };
-  } catch (error) {
-    return rawData;
-  }
-}
+   
 // 🏠 COMPLETE ZILLOW ACTOR FIX - Replace your runApifyScrape function
 
 async function runApifyScrape(apify, urls) {
@@ -1367,6 +1330,132 @@ app.post('/webhooks/video-complete', (req, res) => {
   console.log('Video complete payload:', req.body);
   res.json({ ok:true });
 });
+// ADD THIS HELPER FUNCTION for Zillow buyer signal extraction
+function extractZillowBuyerSignals(html) {
+  const signals = [];
+  
+  try {
+    // Look for buyer activity indicators in Zillow HTML
+    const buyerPatterns = [
+      {
+        pattern: /(\d+)\s*(views?|viewed)/gi,
+        type: 'property_views',
+        extract: (match) => ({
+          text: `Property has ${match[1]} views, indicating active buyer interest`,
+          buyerIndicator: 'high_interest',
+          propertyData: { viewCount: parseInt(match[1]) }
+        })
+      },
+      {
+        pattern: /(saved|favorited)\s*(\d+)\s*times?/gi,
+        type: 'saved_property',
+        extract: (match) => ({
+          text: `Property saved ${match[2]} times by potential buyers`,
+          buyerIndicator: 'serious_interest',
+          propertyData: { saveCount: parseInt(match[2]) }
+        })
+      },
+      {
+        pattern: /price\s*reduced|price\s*drop/gi,
+        type: 'price_reduction',
+        extract: () => ({
+          text: 'Price reduction detected - potential buyer opportunity',
+          buyerIndicator: 'motivated_seller',
+          propertyData: { priceReduced: true }
+        })
+      },
+      {
+        pattern: /new\s*listing|just\s*listed/gi,
+        type: 'new_listing',
+        extract: () => ({
+          text: 'New listing - early buyer opportunity',
+          buyerIndicator: 'fresh_inventory',
+          propertyData: { newListing: true }
+        })
+      },
+      {
+        pattern: /contingent|pending|under\s*contract/gi,
+        type: 'market_activity',
+        extract: () => ({
+          text: 'Market activity detected - active buyer market confirmed',
+          buyerIndicator: 'competitive_market',
+          propertyData: { marketActivity: true }
+        })
+      },
+      {
+        pattern: /\$[\d,]+\s*(?:below|above)\s*(?:list|asking)/gi,
+        type: 'pricing_strategy',
+        extract: (match) => ({
+          text: `Pricing strategy indicates buyer negotiation opportunity: ${match[0]}`,
+          buyerIndicator: 'negotiation_opportunity',
+          propertyData: { pricingStrategy: match[0] }
+        })
+      },
+      {
+        pattern: /zestimate/gi,
+        type: 'valuation_interest',
+        extract: () => ({
+          text: 'Property valuation data available - indicates buyer research activity',
+          buyerIndicator: 'research_activity',
+          propertyData: { hasZestimate: true }
+        })
+      },
+      {
+        pattern: /\d+\s*bed|\d+\s*bath|\d+\s*sqft/gi,
+        type: 'property_specs',
+        extract: (match) => ({
+          text: `Property specifications available for buyer analysis: ${match[0]}`,
+          buyerIndicator: 'detailed_search',
+          propertyData: { hasSpecs: true, specs: match[0] }
+        })
+      }
+    ];
+    
+    // Extract signals using patterns
+    for (const pattern of buyerPatterns) {
+      const matches = [...html.matchAll(pattern.pattern)];
+      
+      for (const match of matches.slice(0, 3)) { // Limit to 3 per pattern
+        try {
+          const signal = pattern.extract(match);
+          signals.push({
+            ...signal,
+            type: pattern.type,
+            extractedAt: new Date().toISOString()
+          });
+        } catch (extractError) {
+          console.error('Error extracting signal:', extractError);
+        }
+      }
+    }
+    
+    // Look for contact forms or lead capture (indicates buyer interest)
+    if (html.includes('contact agent') || html.includes('request info') || html.includes('schedule tour')) {
+      signals.push({
+        text: 'Lead capture forms detected - indicates active buyer engagement opportunity',
+        type: 'lead_capture',
+        buyerIndicator: 'engagement_ready',
+        propertyData: { hasLeadCapture: true }
+      });
+    }
+    
+    // Extract price information
+    const priceMatch = html.match(/\$[\d,]+/);
+    if (priceMatch) {
+      signals.push({
+        text: `Property price range: ${priceMatch[0]} - relevant for buyer qualification`,
+        type: 'price_point',
+        buyerIndicator: 'price_range_known',
+        propertyData: { priceRange: priceMatch[0] }
+      });
+    }
+    
+  } catch (error) {
+    console.error('Zillow signal extraction error:', error);
+  }
+  
+  return signals;
+}
 // 🔧 FIXED /api/comments ENDPOINT - REPLACE YOUR EXISTING ONE
 // Remove ALL duplicate code and use this SINGLE version
 
@@ -1496,132 +1585,6 @@ app.post('/api/comments', async (req, res) => {
       });
     }
 
-// ADD THIS HELPER FUNCTION for Zillow buyer signal extraction
-function extractZillowBuyerSignals(html) {
-  const signals = [];
-  
-  try {
-    // Look for buyer activity indicators in Zillow HTML
-    const buyerPatterns = [
-      {
-        pattern: /(\d+)\s*(views?|viewed)/gi,
-        type: 'property_views',
-        extract: (match) => ({
-          text: `Property has ${match[1]} views, indicating active buyer interest`,
-          buyerIndicator: 'high_interest',
-          propertyData: { viewCount: parseInt(match[1]) }
-        })
-      },
-      {
-        pattern: /(saved|favorited)\s*(\d+)\s*times?/gi,
-        type: 'saved_property',
-        extract: (match) => ({
-          text: `Property saved ${match[2]} times by potential buyers`,
-          buyerIndicator: 'serious_interest',
-          propertyData: { saveCount: parseInt(match[2]) }
-        })
-      },
-      {
-        pattern: /price\s*reduced|price\s*drop/gi,
-        type: 'price_reduction',
-        extract: () => ({
-          text: 'Price reduction detected - potential buyer opportunity',
-          buyerIndicator: 'motivated_seller',
-          propertyData: { priceReduced: true }
-        })
-      },
-      {
-        pattern: /new\s*listing|just\s*listed/gi,
-        type: 'new_listing',
-        extract: () => ({
-          text: 'New listing - early buyer opportunity',
-          buyerIndicator: 'fresh_inventory',
-          propertyData: { newListing: true }
-        })
-      },
-      {
-        pattern: /contingent|pending|under\s*contract/gi,
-        type: 'market_activity',
-        extract: () => ({
-          text: 'Market activity detected - active buyer market confirmed',
-          buyerIndicator: 'competitive_market',
-          propertyData: { marketActivity: true }
-        })
-      },
-      {
-        pattern: /\$[\d,]+\s*(?:below|above)\s*(?:list|asking)/gi,
-        type: 'pricing_strategy',
-        extract: (match) => ({
-          text: `Pricing strategy indicates buyer negotiation opportunity: ${match[0]}`,
-          buyerIndicator: 'negotiation_opportunity',
-          propertyData: { pricingStrategy: match[0] }
-        })
-      },
-      {
-        pattern: /zestimate/gi,
-        type: 'valuation_interest',
-        extract: () => ({
-          text: 'Property valuation data available - indicates buyer research activity',
-          buyerIndicator: 'research_activity',
-          propertyData: { hasZestimate: true }
-        })
-      },
-      {
-        pattern: /\d+\s*bed|\d+\s*bath|\d+\s*sqft/gi,
-        type: 'property_specs',
-        extract: (match) => ({
-          text: `Property specifications available for buyer analysis: ${match[0]}`,
-          buyerIndicator: 'detailed_search',
-          propertyData: { hasSpecs: true, specs: match[0] }
-        })
-      }
-    ];
-    
-    // Extract signals using patterns
-    for (const pattern of buyerPatterns) {
-      const matches = [...html.matchAll(pattern.pattern)];
-      
-      for (const match of matches.slice(0, 3)) { // Limit to 3 per pattern
-        try {
-          const signal = pattern.extract(match);
-          signals.push({
-            ...signal,
-            type: pattern.type,
-            extractedAt: new Date().toISOString()
-          });
-        } catch (extractError) {
-          console.error('Error extracting signal:', extractError);
-        }
-      }
-    }
-    
-    // Look for contact forms or lead capture (indicates buyer interest)
-    if (html.includes('contact agent') || html.includes('request info') || html.includes('schedule tour')) {
-      signals.push({
-        text: 'Lead capture forms detected - indicates active buyer engagement opportunity',
-        type: 'lead_capture',
-        buyerIndicator: 'engagement_ready',
-        propertyData: { hasLeadCapture: true }
-      });
-    }
-    
-    // Extract price information
-    const priceMatch = html.match(/\$[\d,]+/);
-    if (priceMatch) {
-      signals.push({
-        text: `Property price range: ${priceMatch[0]} - relevant for buyer qualification`,
-        type: 'price_point',
-        buyerIndicator: 'price_range_known',
-        propertyData: { priceRange: priceMatch[0] }
-      });
-    }
-    
-  } catch (error) {
-    console.error('Zillow signal extraction error:', error);
-  }
-  
-  return signals;
-}
     // ========== REDDIT PROCESSING ==========
     if (/reddit\.com$/i.test(host) && apify) {
       try {

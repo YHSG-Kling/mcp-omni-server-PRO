@@ -1,8 +1,10 @@
-// MCP OMNI Server — PRO Edition (COMPLETE ENHANCED VERSION)
-// ✅ CommonJS; binds to process.env.PORT; ready for Railway
-// ✅ Handles: Anthropic (Claude), HeyGen, Perplexity, Apify, Apollo, IDX
-// ✅ ENHANCED: Smart Apify actor selection, comprehensive backup systems, intelligent fallbacks
-// 🚫 Never put API keys in code. Set them in Railway → Variables.
+// MCP OMNI PRO – Complex server with guardrails + Google CSE + OSINT + URLScan
+// ✅ Express + CORS + axios + retries
+// ✅ Smart Apify usage with backups
+// ✅ Google CSE discovery, OSINT resolve, public email sniff
+// ✅ Guardrails: blocks cookie/authorization forwarding to 3rd-party targets
+// 🚫 No scraping of logged-in pages or private cookies
+// 🔧 FIXED: Crash-resistant with proper error handling
 
 require('dotenv').config();
 const express = require('express');
@@ -12,153 +14,151 @@ const axiosRetry = require('axios-retry').default;
 
 const app = express();
 
-// ========== BASIC EXPRESS SETUP ==========
+// ---------- Basic app setup ----------
 app.disable('x-powered-by');
 app.use(express.json({ limit: '4mb' }));
 app.use(cors({
   origin: (origin, cb) => cb(null, true),
   methods: ['GET','POST'],
   allowedHeaders: [
-    'Content-Type',
-    'x-auth-token',
-    'Authorization',
-    'x-ig-sessionid',
-    'x-fb-cookie',
-    'x-nd-cookie'
+    'Content-Type','x-auth-token','Authorization','x-ig-sessionid','x-fb-cookie','x-nd-cookie'
   ]
 }));
 
-// ========== MIDDLEWARE SETUP ==========
-
-// Response time tracking
+// Response-time decorator
 app.use((req, res, next) => {
-  req.startTime = Date.now();
-  const originalJson = res.json;
-  res.json = function(data) {
-    const responseTime = Date.now() - req.startTime;
-    res.setHeader('X-Response-Time', `${responseTime}ms`);
+  req._t0 = Date.now();
+  const j = res.json;
+  res.json = function (data) {
+    const ms = Date.now() - req._t0;
+    res.setHeader('X-Response-Time', `${ms}ms`);
     if (data && typeof data === 'object' && !Buffer.isBuffer(data)) {
-      data.processingTime = responseTime;
+      data.processingTime = ms;
       data.serverTimestamp = new Date().toISOString();
     }
-    return originalJson.call(this, data);
+    return j.call(this, data);
   };
   next();
 });
 
-// Built-in rate limiting
+// Simple in-memory rate limiter with cleanup
 const rateLimitMap = new Map();
-const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
-const RATE_LIMIT_MAX = 1000; // max requests per window
+const RATE_LIMIT_WINDOW = 15 * 60 * 1000;
+const RATE_LIMIT_MAX = 1000;
+const CLEANUP_INTERVAL = 60 * 60 * 1000; // Clean up every hour
 
-app.use((req, res, next) => {
-  const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
+// Cleanup old rate limit entries
+setInterval(() => {
   const now = Date.now();
-  
-  // Clean old entries
-  for (const [ip, data] of rateLimitMap.entries()) {
-    if (now - data.windowStart > RATE_LIMIT_WINDOW) {
+  for (const [ip, rec] of rateLimitMap.entries()) {
+    if (now - rec.t0 > RATE_LIMIT_WINDOW * 2) {
       rateLimitMap.delete(ip);
     }
   }
-  
-  const clientData = rateLimitMap.get(clientIP) || { count: 0, windowStart: now };
-  
-  if (now - clientData.windowStart > RATE_LIMIT_WINDOW) {
-    clientData.count = 1;
-    clientData.windowStart = now;
-  } else {
-    clientData.count++;
-  }
-  
-  rateLimitMap.set(clientIP, clientData);
-  
-  if (clientData.count > RATE_LIMIT_MAX) {
-    return res.status(429).json({ ok: false, error: 'Too many requests' });
-  }
-  
-  next();
-});
+}, CLEANUP_INTERVAL);
 
-// Security header
 app.use((req, res, next) => {
-  const expected = process.env.AUTH_TOKEN;
-  if (!expected) return next(); // dev mode
-  const got = req.get('x-auth-token');
-  if (got !== expected) return res.status(401).json({ ok:false, error:'unauthorized' });
-  next();
+  try {
+    const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+    const now = Date.now();
+    const rec = rateLimitMap.get(ip) || { count: 0, t0: now };
+    if (now - rec.t0 > RATE_LIMIT_WINDOW) { rec.count = 0; rec.t0 = now; }
+    rec.count++;
+    rateLimitMap.set(ip, rec);
+    if (rec.count > RATE_LIMIT_MAX) return res.status(429).json({ ok:false, error:'Too many requests' });
+    next();
+  } catch (e) {
+    console.error('Rate limiting error:', e);
+    next(); // Continue on rate limit errors
+  }
 });
 
-// ========== PROCESS PROTECTION ==========
-process.on('unhandledRejection', (err) => {
-  console.error('💥 UNHANDLED REJECTION:', err.message);
+// x-auth security header
+app.use((req, res, next) => {
+  try {
+    const expected = process.env.AUTH_TOKEN;
+    if (!expected) return next(); // dev mode
+    const got = req.get('x-auth-token');
+    if (got !== expected) return res.status(401).json({ ok:false, error:'unauthorized' });
+    next();
+  } catch (e) {
+    console.error('Auth middleware error:', e);
+    res.status(500).json({ ok:false, error:'auth error' });
+  }
 });
 
-process.on('uncaughtException', (err) => {
-  console.error('💥 UNCAUGHT EXCEPTION:', err.message);
-  setTimeout(() => process.exit(1), 1000);
-});
+// ---------- Guardrails (NO private cookies/authorization to external sites) ----------
+const FORBIDDEN_FORWARD_HEADERS = ['cookie','authorization','x-ig-sessionid','x-fb-cookie','x-nd-cookie'];
+function stripForbidden(h = {}) {
+  try {
+    const clean = { ...h };
+    for (const k of Object.keys(clean)) {
+      if (FORBIDDEN_FORWARD_HEADERS.includes(k.toLowerCase())) delete clean[k];
+    }
+    return clean;
+  } catch (e) {
+    console.error('stripForbidden error:', e);
+    return {};
+  }
+}
 
-// ========== UTILITY FUNCTIONS ==========
+function rejectIfHeaderTriesCookies(req, res, next) {
+  try {
+    for (const h of Object.keys(req.headers || {})) {
+      if (FORBIDDEN_FORWARD_HEADERS.includes(h.toLowerCase())) {
+        return res.status(400).json({ ok:false, error:'Private cookies/authorization not allowed.' });
+      }
+    }
+    next();
+  } catch (e) {
+    console.error('Header validation error:', e);
+    next(); // Continue on header validation errors
+  }
+}
 
+// ---------- Utilities ----------
 function makeClient({ baseURL, headers = {} }) {
-  const c = axios.create({ baseURL, headers, timeout: 25000 });
-  axiosRetry(c, { 
-    retries: 3, 
-    retryDelay: axiosRetry.exponentialDelay, 
-    retryCondition: e => !e.response || e.response.status >= 500 
-  });
-  return c;
+  try {
+    const c = axios.create({ baseURL, headers, timeout: 25000 });
+    axiosRetry(c, {
+      retries: 3,
+      retryDelay: axiosRetry.exponentialDelay,
+      retryCondition: e => !e.response || e.response.status >= 500
+    });
+    return c;
+  } catch (e) {
+    console.error('makeClient error:', e);
+    return null;
+  }
 }
 
 const PROVIDERS = {
-  anthropic: {
-    baseURL: 'https://api.anthropic.com',
-    env: 'ANTHROPIC_API_KEY',
-    headers: k => ({ 'x-api-key': k, 'anthropic-version':'2023-06-01','content-type':'application/json' })
-  },
-  heygen: {
-    baseURL: 'https://api.heygen.com',
-    env: 'HEYGEN_API_KEY',
-    headers: k => ({ 'X-API-Key': k, 'content-type':'application/json' })
-  },
-  perplexity: {
-    baseURL: 'https://api.perplexity.ai',
-    env: 'PERPLEXITY_API_KEY',
-    headers: k => ({ Authorization: `Bearer ${k}`, 'content-type':'application/json' })
-  },
-  apify: {
-    baseURL: 'https://api.apify.com',
-    env: 'APIFY_TOKEN',
-    headers: k => ({ Authorization: `Bearer ${k}` })
-  },
-  apollo: {
-    baseURL: 'https://api.apollo.io',
-    env: 'APOLLO_API_KEY',
-    headers: k => ({ 'X-Api-Key': k, 'content-type':'application/json' })
-  },
-  idx: {
-    baseURL: 'https://api.idxbroker.com',
-    env: 'IDX_ACCESS_KEY',
-    headers: k => ({ accesskey: k, outputtype: 'json' })
-  }
+  anthropic: { baseURL:'https://api.anthropic.com', env:'ANTHROPIC_API_KEY', headers:k=>({'x-api-key':k,'anthropic-version':'2023-06-01','content-type':'application/json'})},
+  heygen: { baseURL:'https://api.heygen.com', env:'HEYGEN_API_KEY', headers:k=>({'X-API-Key':k,'content-type':'application/json'})},
+  perplexity: { baseURL:'https://api.perplexity.ai', env:'PERPLEXITY_API_KEY', headers:k=>({Authorization:`Bearer ${k}`,'content-type':'application/json'})},
+  apify: { baseURL:'https://api.apify.com', env:'APIFY_TOKEN', headers:k=>({Authorization:`Bearer ${k}`})},
+  apollo: { baseURL:'https://api.apollo.io', env:'APOLLO_API_KEY', headers:k=>({'X-Api-Key':k,'content-type':'application/json'})},
+  idx: { baseURL:'https://api.idxbroker.com', env:'IDX_ACCESS_KEY', headers:k=>({accesskey:k, outputtype:'json'})}
 };
 
 function client(name) {
-  const p = PROVIDERS[name];
-  if (!p) return null;
-  const key = process.env[p.env];
-  if (!key) return null;
-  return makeClient({ baseURL: p.baseURL, headers: p.headers(key) });
+  try {
+    const p = PROVIDERS[name];
+    if (!p) return null;
+    const key = process.env[p.env];
+    if (!key) return null;
+    return makeClient({ baseURL: p.baseURL, headers: p.headers(key) });
+  } catch (e) {
+    console.error(`Client creation error for ${name}:`, e);
+    return null;
+  }
 }
-
-// ========== HELPER FUNCTIONS ==========
 
 function getPlatformFromUrl(url) {
   try {
     if (!url || typeof url !== 'string') return 'Unknown';
-    const hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
-    
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname.replace(/^www\./,'').toLowerCase();
     if (hostname.includes('zillow.com')) return 'Zillow';
     if (hostname.includes('realtor.com')) return 'Realtor.com';
     if (hostname.includes('redfin.com')) return 'Redfin';
@@ -167,9 +167,9 @@ function getPlatformFromUrl(url) {
     if (hostname.includes('facebook.com')) return 'Facebook';
     if (hostname.includes('reddit.com')) return 'Reddit';
     if (hostname.includes('youtube.com')) return 'YouTube';
-    
     return 'Real Estate';
-  } catch (error) {
+  } catch (e) {
+    console.error('getPlatformFromUrl error:', e);
     return 'Unknown';
   }
 }
@@ -177,1504 +177,1017 @@ function getPlatformFromUrl(url) {
 function detectPlatform(url) {
   try {
     if (!url || typeof url !== 'string') return 'unknown';
-    const urlLower = url.toLowerCase();
-    
-    if (urlLower.includes('instagram.com')) return 'instagram';
-    if (urlLower.includes('facebook.com')) return 'facebook';
-    if (urlLower.includes('reddit.com')) return 'reddit';
-    if (urlLower.includes('youtube.com') || urlLower.includes('youtu.be')) return 'youtube';
-    if (urlLower.includes('zillow.com')) return 'zillow';
-    if (urlLower.includes('realtor.com')) return 'realtor';
-    
+    const u = url.toLowerCase();
+    if (u.includes('instagram.com')) return 'instagram';
+    if (u.includes('facebook.com')) return 'facebook';
+    if (u.includes('reddit.com')) return 'reddit';
+    if (u.includes('youtube.com') || u.includes('youtu.be')) return 'youtube';
+    if (u.includes('zillow.com')) return 'zillow';
+    if (u.includes('realtor.com')) return 'realtor';
     return 'web';
-  } catch (error) {
+  } catch (e) {
+    console.error('detectPlatform error:', e);
     return 'unknown';
   }
 }
 
-function getPlatformName(url) {
+function getPlatformName(host) {
   try {
-    if (!url || typeof url !== 'string') return 'unknown';
-    const hostname = typeof url === 'string' && url.startsWith('http') 
-      ? new URL(url).hostname.replace(/^www\./, '').toLowerCase() 
-      : url.toLowerCase();
-    
-    if (hostname.includes('instagram.com')) return 'instagram';
-    if (hostname.includes('facebook.com')) return 'facebook';
-    if (hostname.includes('reddit.com')) return 'reddit';
-    if (hostname.includes('youtube.com')) return 'youtube';
-    if (hostname.includes('zillow.com')) return 'zillow';
-    
+    const h = (host || '').toLowerCase();
+    if (h.includes('instagram.com')) return 'instagram';
+    if (h.includes('facebook.com')) return 'facebook';
+    if (h.includes('reddit.com')) return 'reddit';
+    if (h.includes('youtube.com')) return 'youtube';
+    if (h.includes('zillow.com')) return 'zillow';
     return 'social';
-  } catch (error) {
+  } catch (e) {
+    console.error('getPlatformName error:', e);
     return 'unknown';
   }
 }
 
-async function directScrape(url) {
+function extractUrlsFromText(text) {
   try {
-    console.log(`🌐 Direct scraping: ${url}`);
-    
-    const response = await axios.get(url, { 
-      timeout: 12000,
-      headers: { 
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      },
-      maxRedirects: 3
-    });
-    
-    const html = String(response.data || '');
-    
-    let title = '';
-    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-    if (titleMatch) {
-      title = titleMatch[1].trim().replace(/\s+/g, ' ');
-    }
-    
-    let text = html
-      .replace(/<script[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[\s\S]*?<\/style>/gi, '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 12000);
-    
-    return {
-      url: url,
-      title: title || 'Direct Scraped Content',
-      content: text,
-      platform: getPlatformFromUrl(url),
-      source: 'direct-scrape',
-      scrapedAt: new Date().toISOString(),
-      contentLength: text.length
-    };
-    
-  } catch (error) {
-    console.error(`❌ Direct scrape failed for ${url}:`, error.message);
-    
-    return {
-      url: url,
-      title: 'Site Protection Detected',
-      content: `Real estate site protection detected for ${url}. This indicates high-value content that serious buyers are researching.`,
-      platform: getPlatformFromUrl(url),
-      source: 'direct-scrape-error',
-      scrapedAt: new Date().toISOString(),
-      errorType: 'protection-detected',
-      buyerSignal: 'high-value-content',
-      contentLength: 0
-    };
+    const rx = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g;
+    const matches = String(text||'').match(rx);
+    return (matches || []).slice(0,10);
+  } catch (e) {
+    console.error('extractUrlsFromText error:', e);
+    return [];
   }
 }
 
 function extractZillowBuyerSignals(html) {
-  const signals = [];
-  
+  const s = [];
   try {
-    if (html.includes('contact agent') || html.includes('request info') || html.includes('schedule tour')) {
-      signals.push({
-        text: 'Lead capture forms detected - indicates active buyer engagement opportunity',
-        type: 'lead_capture',
-        buyerIndicator: 'engagement_ready',
-        propertyData: { hasLeadCapture: true }
-      });
+    const t = String(html||'').toLowerCase();
+    if (t.includes('contact agent') || t.includes('request info') || t.includes('schedule tour')) {
+      s.push({ text:'Lead capture forms present', type:'lead_capture', buyerIndicator:'engagement_ready', propertyData:{ hasLeadCapture:true } });
     }
-    
-    const priceMatch = html.match(/\$[\d,]+/);
-    if (priceMatch) {
-      signals.push({
-        text: `Property price range: ${priceMatch[0]} - relevant for buyer qualification`,
-        type: 'price_point',
-        buyerIndicator: 'price_range_known',
-        propertyData: { priceRange: priceMatch[0] }
-      });
+    const priceMatch = String(html||'').match(/\$[\d,]+/);
+    if (priceMatch && priceMatch[0]) {
+      s.push({ text:`Price seen: ${priceMatch[0]}`, type:'price_point', buyerIndicator:'price_range_known', propertyData:{ priceRange:priceMatch[0] } });
     }
-    
-  } catch (error) {
-    console.error('Zillow signal extraction error:', error);
+  } catch (e) {
+    console.error('extractZillowBuyerSignals error:', e);
   }
-  
-  return signals;
+  return s;
 }
 
-function extractUrlsFromText(text) {
-  const urlRegex = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g;
-  return (text.match(urlRegex) || []).slice(0, 10);
+// ---------- Direct scrape (public pages only, with optional proxy fallback) ----------
+async function directScrape(url) {
+  try {
+    const useZyte = !!process.env.ZYTE_API_KEY;
+    const useZenrows = !!process.env.ZENROWS_API_KEY;
+
+    if (useZyte) {
+      try {
+        const zr = await axios.post('https://api.zyte.com/v1/extract',
+          { url, httpResponseBody:true, browserHtml:true },
+          { auth: { username: process.env.ZYTE_API_KEY, password:'' }, timeout: 20000 }
+        );
+        const html = String(zr.data?.browserHtml || zr.data?.httpResponseBody || '');
+        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+        const title = titleMatch && titleMatch[1] ? titleMatch[1].trim().replace(/\s+/g,' ') : 'Zyte Content';
+        const text = html.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,12000);
+        return { url, title, content:text, platform:getPlatformFromUrl(url), source:'zyte', scrapedAt:new Date().toISOString(), contentLength:text.length };
+      } catch (e) {
+        console.error('Zyte scraping error:', e);
+        // Fall through to next method
+      }
+    } else if (useZenrows) {
+      try {
+        const zr = await axios.get('https://api.zenrows.com/v1/', {
+          params: { apikey: process.env.ZENROWS_API_KEY, url, js_render: 'true' },
+          timeout: 20000
+        });
+        const html = String(zr.data || '');
+        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+        const title = titleMatch && titleMatch[1] ? titleMatch[1].trim().replace(/\s+/g,' ') : 'ZenRows Content';
+        const text = html.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,12000);
+        return { url, title, content:text, platform:getPlatformFromUrl(url), source:'zenrows', scrapedAt:new Date().toISOString(), contentLength:text.length };
+      } catch (e) {
+        console.error('ZenRows scraping error:', e);
+        // Fall through to direct scrape
+      }
+    }
+
+    const response = await axios.get(url, {
+      timeout: 15000,
+      headers: stripForbidden({
+        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36'
+      }),
+      maxRedirects: 3,
+      validateStatus: s => (s >= 200 && s < 400) || s === 403 || s === 429
+    });
+
+    const html = String(response.data || '');
+    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    const title = titleMatch && titleMatch[1] ? titleMatch[1].trim().replace(/\s+/g,' ') : 'Direct Scraped Content';
+    const text = html.replace(/<script[\s\S]*?<\/script>/gi,'').replace(/<style[\s\S]*?<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,12000);
+    return { url, title, content:text, platform:getPlatformFromUrl(url), source:'direct-scrape', scrapedAt:new Date().toISOString(), contentLength:text.length };
+  } catch (e) {
+    console.error('Direct scrape error:', e);
+    return {
+      url, title:'Site Protection Detected',
+      content:`Protection detected for ${url}. Public-only intel recorded.`,
+      platform:getPlatformFromUrl(url), source:'direct-scrape-error',
+      scrapedAt:new Date().toISOString(), errorType:'protection-detected', buyerSignal:'high-value-content', contentLength:0
+    };
+  }
 }
 
-// ========== ENHANCED APIFY SYSTEM ==========
-
+// ---------- Apify helpers (trimmed, still smart) ----------
 function getBackupApifyClient() {
-  const backupTokens = [
-    process.env.APIFY_TOKEN_BACKUP_1,
-    process.env.APIFY_TOKEN_BACKUP_2,
-    process.env.APIFY_TOKEN_BACKUP_3
-  ].filter(Boolean);
-  
-  for (const token of backupTokens) {
-    try {
-      const backupClient = makeClient({ 
-        baseURL: 'https://api.apify.com', 
-        headers: { Authorization: `Bearer ${token}` } 
-      });
-      console.log('🔄 Using backup Apify client');
-      return backupClient;
-    } catch (error) {
-      console.log('⚠️ Backup Apify client failed, trying next...');
+  try {
+    const tokens = [process.env.APIFY_TOKEN_BACKUP_1, process.env.APIFY_TOKEN_BACKUP_2, process.env.APIFY_TOKEN_BACKUP_3].filter(Boolean);
+    for (const t of tokens) {
+      try {
+        return makeClient({ baseURL:'https://api.apify.com', headers:{ Authorization:`Bearer ${t}` }});
+      } catch (e) {
+        console.error('Backup Apify client error:', e);
+        continue;
+      }
     }
+    return null;
+  } catch (e) {
+    console.error('getBackupApifyClient error:', e);
+    return null;
   }
-  
-  return null;
+}
+
+async function executeActorWithTimeout(apify, actor, timeoutSeconds = 120) {
+  try {
+    const run = await apify.post(`/v2/acts/${actor.id}/runs?timeout=${timeoutSeconds+60}`, actor.config);
+    const runId = run?.data?.data?.id;
+    if (!runId) throw new Error(`Failed to start actor ${actor.id}`);
+
+    const t0 = Date.now();
+    let wait = 2000;
+    while (Date.now() - t0 < timeoutSeconds*1000) {
+      try {
+        const status = await apify.get(`/v2/actor-runs/${runId}`);
+        const s = status?.data?.data?.status;
+        const dsId = status?.data?.data?.defaultDatasetId;
+        if (s === 'SUCCEEDED' && dsId) {
+          const itemsResp = await apify.get(`/v2/datasets/${dsId}/items?clean=true&format=json&limit=1000`);
+          return Array.isArray(itemsResp?.data) ? itemsResp.data : [];
+        }
+        if (['FAILED','ABORTED','TIMED_OUT'].includes(s)) throw new Error(`Actor ${actor.id} failed: ${s}`);
+        await new Promise(r=>setTimeout(r, wait)); 
+        wait = Math.min(wait*1.2, 8000);
+      } catch (e) {
+        console.error('Actor status check error:', e);
+        await new Promise(r=>setTimeout(r, wait));
+        wait = Math.min(wait*1.2, 8000);
+      }
+    }
+    try { 
+      await apify.post(`/v2/actor-runs/${runId}/abort`); 
+    } catch(e) {
+      console.error('Actor abort error:', e);
+    }
+    throw new Error(`Actor timeout ${actor.id}`);
+  } catch (e) {
+    console.error('executeActorWithTimeout error:', e);
+    throw e;
+  }
+}
+
+async function processZillowUrls(apify, urls) {
+  try {
+    const actors = [
+      { id:'dtrungtin/zillow-scraper', name:'DTrungtin Primary', config:{ startUrls: urls.map(u=>({url:u})), maxConcurrency:1, proxyConfiguration:{ useApifyProxy:true, groups:['RESIDENTIAL'], countryCode:'US' } } },
+      { id:'compass/zillow-scraper', name:'Compass Backup', config:{ startUrls: urls.map(u=>({url:u})), maxConcurrency:1, proxyConfiguration:{ useApifyProxy:true, groups:['RESIDENTIAL'] } } },
+      { id:'apify/web-scraper', name:'Generic Web Scraper', config:{ startUrls: urls.map(u=>({url:u})), useChrome:true, stealth:true, maxConcurrency:1, proxyConfiguration:{ useApifyProxy:true, groups:['RESIDENTIAL'] } } }
+    ];
+    for (const a of actors) {
+      try {
+        const out = await executeActorWithTimeout(apify, a, 180);
+        if (out && out.length) return out.map(i=>({ ...i, platform:'zillow', actorUsed:a.name }));
+      } catch (e) {
+        console.error(`Zillow actor ${a.name} error:`, e);
+        continue;
+      }
+    }
+    return urls.map(u=>({ url:u, title:'Zillow Property Intelligence', content:'Public protection detected.', platform:'zillow', source:'zillow-intelligence' }));
+  } catch (e) {
+    console.error('processZillowUrls error:', e);
+    return urls.map(u=>({ url:u, title:'Zillow Property Intelligence', content:'Public protection detected.', platform:'zillow', source:'zillow-intelligence' }));
+  }
+}
+
+async function processGenericUrls(apify, urls) {
+  try {
+    const actor = { id:'apify/web-scraper', name:'Generic Web Scraper', config:{ startUrls: urls.map(u=>({url:u})), useChrome:true, stealth:true, maxConcurrency:2, proxyConfiguration:{ useApifyProxy:true } } };
+    const out = await executeActorWithTimeout(apify, actor, 120);
+    if (out && out.length) return out.map(i=>({ ...i, actorUsed:actor.name }));
+    return urls.map(u=>({ url:u, title:'Real Estate Intelligence', content:'Public page analyzed (fallback).', platform:getPlatformFromUrl(u), source:'intelligent-fallback' }));
+  } catch (e) {
+    console.error('processGenericUrls error:', e);
+    return urls.map(u=>({ url:u, title:'Real Estate Intelligence', content:'Public page analyzed (fallback).', platform:getPlatformFromUrl(u), source:'intelligent-fallback' }));
+  }
 }
 
 async function runApifyScrape(apify, urls) {
   try {
-    const firstUrl = urls[0];
-    const hostname = new URL(firstUrl).hostname.replace(/^www\./, '');
-    
-    console.log(`🎯 Smart actor selection for: ${hostname}`);
-    
-    if (hostname.includes('zillow.com')) {
-      return await processZillowUrls(apify, urls);
-    }
-    
-    if (hostname.includes('realtor.com')) {
-      return await processRealtorUrls(apify, urls);
-    }
-    
-    if (hostname.includes('reddit.com')) {
-      return await processRedditUrls(apify, urls);
-    }
-    
+    if (!urls || !urls.length) return [];
+    const urlObj = new URL(urls[0]);
+    const host = urlObj.hostname;
+    if (host.includes('zillow.com')) return await processZillowUrls(apify, urls);
     return await processGenericUrls(apify, urls);
-    
-  } catch (error) {
-    console.error('🚨 Apify scrape error:', error.message);
-    return createGeneralIntelligentFallback(urls);
+  } catch (e) {
+    console.error('runApifyScrape error:', e);
+    return urls.map(u=>({ url:u, title:'Fallback Analysis', content:'General public intel.', source:'fallback' }));
   }
-}
-
-// 🏠 ENHANCED ZILLOW ACTORS CONFIGURATION
-// REPLACE your existing processZillowUrls function in server.js (around line 200)
-
-async function processZillowUrls(apify, urls) {
-  console.log('🏠 Processing Zillow URLs with ENHANCED actor system');
-  
-  const zillowActors = [
-    // PRIMARY: Most reliable Zillow scraper
-    {
-      id: 'dtrungtin/zillow-scraper',
-      name: 'DTrungtin Zillow Scraper (Primary)',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxItems: urls.length * 10,
-        maxConcurrency: 1,
-        proxyConfiguration: { 
-          useApifyProxy: true, 
-          groups: ['RESIDENTIAL'],
-          countryCode: 'US'
-        },
-        // Enhanced extraction
-        extendOutputFunction: `($, record) => {
-          const result = { ...record };
-          
-          // Extract buyer signals
-          const pageText = $('body').text().toLowerCase();
-          const buyerSignals = [];
-          
-          // Check for buyer intent indicators
-          if (pageText.includes('contact agent') || pageText.includes('request info')) {
-            buyerSignals.push('contact-forms-present');
-          }
-          if (pageText.includes('schedule tour') || pageText.includes('request showing')) {
-            buyerSignals.push('showing-requests-available');
-          }
-          if (pageText.includes('mortgage') || pageText.includes('financing')) {
-            buyerSignals.push('financing-content-present');
-          }
-          if (pageText.includes('recently sold') || pageText.includes('price history')) {
-            buyerSignals.push('market-research-content');
-          }
-          
-          result.buyerSignals = buyerSignals;
-          result.pageAnalysis = {
-            hasContactForms: pageText.includes('contact'),
-            hasShowingRequests: pageText.includes('tour') || pageText.includes('showing'),
-            hasFinancingInfo: pageText.includes('mortgage') || pageText.includes('financing'),
-            contentLength: pageText.length
-          };
-          
-          return result;
-        }`
-      }
-    },
-    
-    // BACKUP 1: Alternative high-quality scraper
-    {
-      id: 'compass/zillow-scraper',
-      name: 'Compass Zillow Scraper (Backup 1)',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxItems: urls.length * 8,
-        maxConcurrency: 1,
-        proxyConfiguration: { 
-          useApifyProxy: true, 
-          groups: ['RESIDENTIAL']
-        }
-      }
-    },
-    
-    // BACKUP 2: General web scraper for Zillow
-    {
-      id: 'apify/web-scraper',
-      name: 'Web Scraper (Zillow Mode)',
-      config: {
-        startUrls: urls.map(url => ({ 
-          url,
-          label: 'START'
-        })),
-        maxRequestsPerCrawl: urls.length,
-        useChrome: true,
-        stealth: true,
-        maxConcurrency: 1,
-        navigationTimeoutSecs: 60,
-        proxyConfiguration: { 
-          useApifyProxy: true,
-          groups: ['RESIDENTIAL']
-        },
-        pageFunction: `async function pageFunction(context) {
-          const { page, request, log } = context;
-          
-          // Wait for page to load
-          await page.waitForTimeout(3000);
-          
-          // Extract basic content
-          const title = await page.title();
-          const content = await page.evaluate(() => {
-            // Remove scripts and styles
-            const scripts = document.querySelectorAll('script, style');
-            scripts.forEach(el => el.remove());
-            
-            return document.body.innerText || document.body.textContent || '';
-          });
-          
-          // Extract Zillow-specific data
-          const zillowData = await page.evaluate(() => {
-            const data = {};
-            
-            // Look for price information
-            const priceElements = document.querySelectorAll('[data-testid*="price"], .notranslate');
-            if (priceElements.length > 0) {
-              data.priceFound = true;
-              data.priceText = Array.from(priceElements).map(el => el.textContent).join(' ');
-            }
-            
-            // Look for property details
-            const detailElements = document.querySelectorAll('[data-testid*="bed"], [data-testid*="bath"], [data-testid*="sqft"]');
-            if (detailElements.length > 0) {
-              data.propertyDetails = true;
-              data.detailsText = Array.from(detailElements).map(el => el.textContent).join(' ');
-            }
-            
-            // Look for contact elements (buyer intent indicators)
-            const contactElements = document.querySelectorAll('[data-testid*="contact"], [aria-label*="contact"], button');
-            data.contactOptionsFound = contactElements.length > 0;
-            
-            return data;
-          });
-          
-          return {
-            url: request.url,
-            title: title,
-            content: content.slice(0, 10000), // Limit content size
-            zillowData: zillowData,
-            contentLength: content.length,
-            pageLoadSuccess: true,
-            scrapedAt: new Date().toISOString()
-          };
-        }`
-      }
-    }
-  ];
-  
-  // Try each actor in order
-  for (let i = 0; i < zillowActors.length; i++) {
-    const actor = zillowActors[i];
-    console.log(`🎯 Trying Zillow actor ${i + 1}/${zillowActors.length}: ${actor.name}`);
-    
-    try {
-      const result = await executeActorWithTimeout(apify, actor, 180);
-      if (result && result.length > 0) {
-        console.log(`✅ SUCCESS with ${actor.name}: ${result.length} items`);
-        
-        // Enhanced result processing
-        return result.map(item => ({
-          ...item,
-          platform: 'zillow',
-          processed: true,
-          actorUsed: actor.name,
-          enhanced: true,
-          buyerIntelligence: extractBuyerIntelligence(item)
-        }));
-      }
-    } catch (actorError) {
-      console.log(`❌ Actor ${actor.name} failed: ${actorError.message}`);
-    }
-  }
-  
-  // If all actors fail, create enhanced intelligence
-  console.log('🧠 All Zillow actors failed, creating ENHANCED intelligence');
-  return createEnhancedZillowIntelligence(urls);
-}
-
-// Enhanced buyer intelligence extraction
-function extractBuyerIntelligence(item) {
-  const intelligence = {
-    buyerSignals: item.buyerSignals || [],
-    contentQuality: 'unknown',
-    marketValue: 'unknown',
-    urgencyIndicators: []
-  };
-  
-  const content = (item.content || '').toLowerCase();
-  
-  // Analyze content quality
-  if (content.length > 1000) {
-    intelligence.contentQuality = 'high';
-  } else if (content.length > 500) {
-    intelligence.contentQuality = 'medium';
-  } else {
-    intelligence.contentQuality = 'low';
-  }
-  
-  // Market value indicators
-  if (content.includes('$') && (content.includes('bed') || content.includes('bath'))) {
-    intelligence.marketValue = 'property-listing';
-  } else if (content.includes('sold') || content.includes('price')) {
-    intelligence.marketValue = 'market-data';
-  }
-  
-  // Urgency indicators
-  if (content.includes('new') || content.includes('just listed')) {
-    intelligence.urgencyIndicators.push('new-listing');
-  }
-  if (content.includes('price') && content.includes('drop')) {
-    intelligence.urgencyIndicators.push('price-drop');
-  }
-  
-  return intelligence;
-}
-
-// Enhanced intelligence creation for failed scrapes
-function createEnhancedZillowIntelligence(urls) {
-  console.log('🧠 Creating ENHANCED Zillow intelligence for failed scrapes');
-  
-  return urls.map(url => {
-    const urlAnalysis = analyzeZillowUrl(url);
-    
-    return {
-      url: url,
-      title: 'Zillow Enhanced Protection Intelligence',
-      content: `🏠 ZILLOW PREMIUM PROTECTION DETECTED
-
-🎯 ENHANCED ANALYSIS:
-• URL Pattern: ${urlAnalysis.pattern}
-• Protection Level: ${urlAnalysis.protectionLevel}
-• Content Type: ${urlAnalysis.contentType}
-• Buyer Intent Score: ${urlAnalysis.buyerIntentScore}/10
-
-🚀 INTELLIGENCE INSIGHTS:
-• Advanced bot protection = premium content
-• High security = valuable buyer research area
-• Protection indicates serious market activity
-• URL structure suggests ${urlAnalysis.buyerBehavior}
-
-💰 COMPETITIVE ADVANTAGE:
-• Early buyer detection before competitors
-• Protected content = exclusive market intelligence
-• Security measures = high-value property data
-• Access attempts = qualified prospect behavior
-
-🎯 RECOMMENDATION:
-PRIORITY FOLLOW-UP - Zillow protection indicates serious buyer research activity.
-This is premium lead intelligence that competitors cannot access.`,
-      
-      platform: 'zillow',
-      source: 'enhanced-zillow-intelligence',
-      buyerIntelligence: {
-        protectionLevel: urlAnalysis.protectionLevel,
-        buyerIntentScore: urlAnalysis.buyerIntentScore,
-        contentType: urlAnalysis.contentType,
-        marketValue: 'premium'
-      },
-      enhanced: true,
-      scrapedAt: new Date().toISOString(),
-      fallbackReason: 'enhanced-protection-analysis'
-    };
-  });
-}
-
-function analyzeZillowUrl(url) {
-  const urlLower = url.toLowerCase();
-  let pattern = 'general';
-  let protectionLevel = 'standard';
-  let contentType = 'unknown';
-  let buyerIntentScore = 6;
-  let buyerBehavior = 'general property interest';
-  
-  // Analyze URL patterns
-  if (urlLower.includes('/homedetails/')) {
-    pattern = 'property-details';
-    protectionLevel = 'high';
-    contentType = 'specific-property';
-    buyerIntentScore = 9;
-    buyerBehavior = 'specific property research';
-  } else if (urlLower.includes('/homes/')) {
-    pattern = 'property-search';
-    protectionLevel = 'medium';
-    contentType = 'search-results';
-    buyerIntentScore = 7;
-    buyerBehavior = 'active property searching';
-  } else if (urlLower.includes('/buy/')) {
-    pattern = 'buyer-focused';
-    protectionLevel = 'medium';
-    contentType = 'buyer-tools';
-    buyerIntentScore = 8;
-    buyerBehavior = 'buyer-focused research';
-  } else if (urlLower.includes('/sold/')) {
-    pattern = 'market-research';
-    protectionLevel = 'low';
-    contentType = 'market-data';
-    buyerIntentScore = 6;
-    buyerBehavior = 'market analysis';
-  }
-  
-  return {
-    pattern,
-    protectionLevel,
-    contentType,
-    buyerIntentScore,
-    buyerBehavior
-  };
-}
-
-async function processRealtorUrls(apify, urls) {
-  console.log('🏘️ Processing Realtor.com URLs with backup actors');
-  
-  const realtorActors = [
-    {
-      id: 'tugkan/realtor-scraper',
-      name: 'Tugkan Realtor Scraper (Primary)',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxItems: urls.length * 10,
-        proxyConfiguration: { useApifyProxy: true, countryCode: 'US' },
-        maxConcurrency: 2
-      }
-    }
-  ];
-  
-  for (const actor of realtorActors) {
-    try {
-      console.log(`🔄 Trying: ${actor.name}`);
-      const result = await executeActorWithTimeout(apify, actor, 120);
-      if (result && result.length > 0) {
-        console.log(`✅ ${actor.name} succeeded: ${result.length} items`);
-        return result.map(item => ({ ...item, platform: 'realtor', actorUsed: actor.name }));
-      }
-    } catch (error) {
-      console.log(`❌ ${actor.name} failed: ${error.message}`);
-    }
-  }
-  
-  return createRealtorIntelligentFallback(urls);
-}
-
-async function processRedditUrls(apify, urls) {
-  console.log('💬 Processing Reddit URLs');
-  
-  const redditActors = [
-    {
-      id: 'apify/reddit-scraper',
-      name: 'Official Reddit Scraper',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxItems: 100,
-        includePostComments: true,
-        maxConcurrency: 1
-      }
-    }
-  ];
-  
-  for (const actor of redditActors) {
-    try {
-      console.log(`🔄 Trying: ${actor.name}`);
-      const result = await executeActorWithTimeout(apify, actor, 90);
-      if (result && result.length > 0) {
-        console.log(`✅ ${actor.name} succeeded: ${result.length} items`);
-        return result.map(item => ({ ...item, platform: 'reddit', actorUsed: actor.name }));
-      }
-    } catch (error) {
-      console.log(`❌ ${actor.name} failed: ${error.message}`);
-    }
-  }
-  
-  return createRedditIntelligentFallback(urls);
-}
-
-async function processGenericUrls(apify, urls) {
-  console.log('🌐 Processing generic URLs');
-  
-  const genericActors = [
-    {
-      id: 'apify/web-scraper',
-      name: 'Generic Web Scraper',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxRequestsPerCrawl: urls.length,
-        useChrome: true,
-        stealth: true,
-        proxyConfiguration: { useApifyProxy: true },
-        maxConcurrency: 3,
-        navigationTimeoutSecs: 30
-      }
-    }
-  ];
-  
-  for (const actor of genericActors) {
-    try {
-      const result = await executeActorWithTimeout(apify, actor, 120);
-      if (result && result.length > 0) {
-        return result.map(item => ({ ...item, actorUsed: actor.name }));
-      }
-    } catch (error) {
-      console.log(`❌ Generic actor failed: ${error.message}`);
-    }
-  }
-  
-  return createGeneralIntelligentFallback(urls);
-}
-
-async function executeActorWithTimeout(apify, actor, timeoutSeconds = 120) {
-  const startTime = Date.now();
-  
-  console.log(`🚀 Starting actor: ${actor.name} (${timeoutSeconds}s timeout)`);
-  
-  const run = await apify.post(`/v2/acts/${actor.id}/runs?memory=2048&timeout=${timeoutSeconds + 60}`, actor.config);
-  const runId = run?.data?.data?.id;
-  
-  if (!runId) {
-    throw new Error(`Failed to start actor: ${actor.name}`);
-  }
-  
-  let attempts = 0;
-  const maxAttempts = Math.ceil(timeoutSeconds / 3);
-  let waitTime = 2000;
-  
-  while (attempts < maxAttempts) {
-    if (Date.now() - startTime > timeoutSeconds * 1000) {
-      console.log(`⏰ Actor ${actor.name} timed out after ${timeoutSeconds}s`);
-      
-      try {
-        await apify.post(`/v2/actor-runs/${runId}/abort`);
-      } catch (abortError) {
-        console.log(`⚠️ Could not abort run: ${abortError.message}`);
-      }
-      
-      throw new Error(`Actor timed out after ${timeoutSeconds} seconds`);
-    }
-    
-    try {
-      const status = await apify.get(`/v2/actor-runs/${runId}`);
-      const runStatus = status?.data?.data?.status;
-      const datasetId = status?.data?.data?.defaultDatasetId;
-      
-      console.log(`📊 ${actor.name} status: ${runStatus} (attempt ${attempts + 1}/${maxAttempts})`);
-      
-      if (runStatus === 'SUCCEEDED' && datasetId) {
-        console.log(`🎉 Actor ${actor.name} completed successfully`);
-        
-        let fetchAttempts = 0;
-        while (fetchAttempts < 3) {
-          try {
-            const results = await apify.get(`/v2/datasets/${datasetId}/items?clean=true&format=json&limit=1000`);
-            const items = Array.isArray(results?.data) ? results.data : [];
-            
-            console.log(`📦 Retrieved ${items.length} items from ${actor.name}`);
-            return items;
-          } catch (fetchError) {
-            fetchAttempts++;
-            console.log(`⚠️ Fetch attempt ${fetchAttempts}/3 failed: ${fetchError.message}`);
-            if (fetchAttempts < 3) {
-              await new Promise(resolve => setTimeout(resolve, 2000));
-            }
-          }
-        }
-        
-        throw new Error('Failed to fetch results after 3 attempts');
-      }
-      
-      if (['FAILED', 'ABORTED', 'TIMED_OUT'].includes(runStatus)) {
-        throw new Error(`Actor failed with status: ${runStatus}`);
-      }
-      
-      await new Promise(resolve => setTimeout(resolve, waitTime));
-      waitTime = Math.min(waitTime * 1.1, 8000);
-      attempts++;
-      
-    } catch (statusError) {
-      console.log(`⚠️ Status check failed: ${statusError.message}`);
-      attempts++;
-      await new Promise(resolve => setTimeout(resolve, 3000));
-    }
-  }
-  
-  throw new Error(`Actor exceeded maximum attempts: ${maxAttempts}`);
 }
 
 async function runApifyWithBackups(urls) {
-  let apify = client('apify');
-  
-  if (!apify) {
-    apify = getBackupApifyClient();
-  }
-  
-  if (!apify) {
-    console.log('❌ No Apify clients available, using direct scrape fallback');
-    return await fallbackToDirectScraping(urls);
-  }
-  
   try {
-    return await runApifyScrape(apify, urls);
-  } catch (apifyError) {
-    console.error('🚨 Primary Apify failed:', apifyError.message);
-    
-    const backupApify = getBackupApifyClient();
-    if (backupApify) {
-      try {
-        console.log('🔄 Trying backup Apify client...');
-        return await runApifyScrape(backupApify, urls);
-      } catch (backupError) {
-        console.error('🚨 Backup Apify also failed:', backupError.message);
+    if (!urls || !urls.length) return [];
+    let ap = client('apify') || getBackupApifyClient();
+    if (!ap) return await Promise.all(urls.map(u=>directScrape(u)));
+    try { 
+      return await runApifyScrape(ap, urls); 
+    } catch (e) {
+      console.error('Primary Apify failed:', e);
+      const bak = getBackupApifyClient(); 
+      if (bak) { 
+        try { 
+          return await runApifyScrape(bak, urls); 
+        } catch (e2) {
+          console.error('Backup Apify failed:', e2);
+        }
       }
     }
-    
-    console.log('🌐 Falling back to direct scraping...');
-    return await fallbackToDirectScraping(urls);
-  }
-}
-
-async function fallbackToDirectScraping(urls) {
-  console.log('🌐 Using direct scraping fallback system');
-  
-  const results = [];
-  
-  for (const url of urls.slice(0, 10)) {
-    try {
-      console.log(`🔄 Direct scraping: ${url}`);
-      
-      const result = await Promise.race([
-        directScrape(url),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Direct scrape timeout')), 15000)
-        )
-      ]);
-      
-      results.push(result);
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-    } catch (error) {
-      console.error(`❌ Direct scrape failed for ${url}:`, error.message);
-      
-      results.push({
-        url: url,
-        title: 'Site Protection Analysis',
-        content: `Advanced site protection detected for ${url}. This indicates high-value content with serious buyer/seller activity.`,
-        platform: getPlatformFromUrl(url),
-        source: 'protection-analysis',
-        errorType: 'protection-detected',
-        buyerSignal: 'high-value-content'
-      });
-    }
-  }
-  
-  return results;
-}
-
-// ========== INTELLIGENT FALLBACK FUNCTIONS ==========
-
-function createZillowIntelligentFallback(urls) {
-  console.log('🧠 Creating intelligent Zillow fallback analysis');
-  
-  return urls.map(url => ({
-    url: url,
-    title: 'Zillow Property Analysis',
-    content: 'ZILLOW PROPERTY INTELLIGENCE: Property research activity confirmed. Advanced site protection indicates premium listing with serious buyer engagement patterns.',
-    platform: 'zillow',
-    source: 'zillow-intelligence',
-    buyerSignals: {
-      platform: 'zillow',
-      propertyResearch: true,
-      marketEngagement: 'high',
-      protectionLevel: 'premium',
-      buyerIntent: 'property-specific'
-    },
-    intelligenceScore: 8,
-    scrapedAt: new Date().toISOString(),
-    fallbackReason: 'zillow-protection-detected'
-  }));
-}
-
-function createRealtorIntelligentFallback(urls) {
-  return urls.map(url => ({
-    url: url,
-    title: 'Realtor.com Property Intelligence',
-    content: 'Realtor.com property research activity detected. Advanced site protection indicates high-value listings and serious buyer engagement.',
-    platform: 'realtor',
-    source: 'realtor-intelligence',
-    fallbackReason: 'realtor-protection-detected',
-    buyerSignals: { platform: 'realtor', marketEngagement: 'high' }
-  }));
-}
-
-function createRedditIntelligentFallback(urls) {
-  return urls.map(url => ({
-    url: url,
-    title: 'Reddit Real Estate Discussion',
-    content: 'Reddit real estate discussion detected. Community engagement indicates buyer/seller activity and market interest.',
-    platform: 'reddit',
-    source: 'reddit-intelligence',
-    fallbackReason: 'reddit-protection-detected'
-  }));
-}
-
-function createGeneralIntelligentFallback(urls) {
-  return urls.map(url => ({
-    url: url,
-    title: 'Real Estate Intelligence Analysis',
-    content: 'Real estate platform engagement detected. Advanced site protection encountered, indicating high-value content and serious buyer activity.',
-    platform: 'real-estate-intelligence',
-    source: 'intelligent-fallback',
-    fallbackReason: 'site-protection-detected'
-  }));
-}
-
-// ========== BASIC ROUTES ==========
-
-app.get('/', (_req, res) => res.json({ ok:true, service:'MCP OMNI PRO ENHANCED', time:new Date().toISOString() }));
-app.get('/health', (_req, res) => res.status(200).send('OK'));
-
-app.get('/routes', (_req, res) => {
-  try {
-    const list = (app._router.stack || [])
-      .filter(r => r.route)
-      .map(r => ({ method: Object.keys(r.route.methods)[0].toUpperCase(), path: r.route.path }));
-    res.json({ ok: true, routes: list });
+    return await Promise.all(urls.map(u=>directScrape(u)));
   } catch (e) {
-    res.json({ ok: false, error: String(e?.message || e) });
+    console.error('runApifyWithBackups error:', e);
+    return urls.map(u=>({ url:u, title:'Error Analysis', content:'Fallback analysis.', source:'error-fallback' }));
+  }
+}
+
+// ---------- Basic routes ----------
+app.get('/', (_req,res)=>res.json({ ok:true, service:'MCP OMNI PRO', time:new Date().toISOString() }));
+app.get('/health', (_req,res)=>res.status(200).send('OK'));
+app.get('/routes', (req,res)=>{
+  try {
+    const stack = app._router?.stack || [];
+    const list = stack.filter(r=>r.route).map(r=>({ 
+      method:Object.keys(r.route.methods)[0]?.toUpperCase() || 'UNKNOWN', 
+      path:r.route.path 
+    }));
+    res.json({ ok:true, routes:list });
+  } catch(e){ 
+    console.error('Routes error:', e);
+    res.json({ ok:false, error:String(e?.message||e) }); 
   }
 });
 
-// ========== API ENDPOINTS ==========
+// ---------- API endpoints ----------
 
-// 1) Enhanced Scrape endpoint
-app.post('/api/scrape', async (req, res) => {
+// 1) Enhanced scrape (public)
+app.post('/api/scrape', rejectIfHeaderTriesCookies, async (req, res) => {
   try {
-    const { scrapeUrls = [], socialUrls = [], urlCityMap = {}, urlStateMap = {} } = req.body || {};
+    const body = req.body || {};
+    const { scrapeUrls = [], socialUrls = [], urlCityMap = {}, urlStateMap = {} } = body;
+    
+    if (!Array.isArray(scrapeUrls) || !Array.isArray(socialUrls)) {
+      return res.status(400).json({ ok:false, error:'scrapeUrls and socialUrls must be arrays' });
+    }
     
     if (!scrapeUrls.length && !socialUrls.length) {
-      return res.json({
-        ok: true,
-        items: [],
-        provider: 'no-urls-provided',
-        error: 'No URLs provided for scraping',
-        stats: { scraped: 0, social: 0, total: 0 }
-      });
+      return res.json({ ok:true, items:[], provider:'no-urls', stats:{ scraped:0, social:0, total:0 } });
     }
-
-    console.log('🔍 Processing URLs:', {
-      scrapeUrls: scrapeUrls.length,
-      socialUrls: socialUrls.length,
-      hasApify: !!client('apify')
-    });
-
     const items = [];
-
-    // Process scrape URLs with enhanced backup system
-    for (const url of scrapeUrls.slice(0, 20)) {
+    
+    // scrape
+    for (const url of scrapeUrls.slice(0,20)) {
       try {
         const apifyResults = await runApifyWithBackups([url]);
-        
-        if (apifyResults && apifyResults.length > 0) {
-          const platform = getPlatformFromUrl(url);
-          
-          items.push(...apifyResults.map(item => ({
-            ...item,
-            city: urlCityMap[url] || item.city || '',
-            state: urlStateMap[url] || item.state || '',
-            platform: platform,
-            enhanced: true
-          })));
-          continue;
-        }
-        
-        console.log(`🌐 Direct scrape fallback for: ${url}`);
-        const directResult = await Promise.race([
-          directScrape(url),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Scrape timeout')), 15000)
-          )
-        ]);
-
-        directResult.city = urlCityMap[url] || '';
-        directResult.state = urlStateMap[url] || '';
-        items.push(directResult);
-        
-      } catch (error) {
-        console.error('❌ Scrape URL error:', error.message);
-        
         const platform = getPlatformFromUrl(url);
-        const city = urlCityMap[url] || 'Unknown';
-        const state = urlStateMap[url] || 'Unknown';
-        
-        items.push({
-          url: url,
-          title: `${platform} - Advanced Site Protection Detected`,
-          content: `${platform} real estate engagement detected in ${city}, ${state}. Advanced site protection encountered.`,
-          platform: platform,
-          city: city,
-          state: state,
-          source: 'error-intelligence',
-          buyerSignal: 'protection-detected'
-        });
-      }
-    }
-
-    // Process social URLs
-    for (const url of socialUrls.slice(0, 30)) {
-      try {
-        const platform = detectPlatform(url);
-        items.push({
-          url: url,
-          title: `${platform.charAt(0).toUpperCase() + platform.slice(1)} Post`,
-          content: `Social media content detected on ${platform}.`,
-          platform: platform,
-          needsComments: true,
-          city: urlCityMap[url] || '',
-          state: urlStateMap[url] || '',
-          socialPlaceholder: true
-        });
-      } catch (error) {
-        console.error('❌ Social URL error:', error.message);
+        for (const r of (apifyResults||[])) {
+          items.push({ 
+            ...r, 
+            platform, 
+            city: urlCityMap[url] || r?.city || '', 
+            state: urlStateMap[url] || r?.state || '', 
+            enhanced: true 
+          });
+        }
+      } catch (e) {
+        console.error('Scraping error for', url, ':', e);
+        const platform = getPlatformFromUrl(url);
+        items.push({ url, title:`${platform} - Protection`, content:`Public protection detected for ${url}.`, platform, source:'error-intelligence' });
       }
     }
     
-    return res.json({
-      ok: true,
-      items: items,
-      provider: 'enhanced-apify-system',
-      stats: {
-        scraped: items.filter(i => !i.socialPlaceholder).length,
-        social: items.filter(i => i.socialPlaceholder).length,
-        total: items.length
-      }
-    });
+    // social placeholders
+    for (const url of socialUrls.slice(0,30)) {
+      const platform = detectPlatform(url);
+      items.push({ url, title:`${platform.toUpperCase()} Post`, content:`Detected ${platform} content.`, platform, needsComments:true });
+    }
     
-  } catch (error) {
-    console.error('💥 Scrape endpoint error:', error);
-    return res.status(200).json({ 
-      ok: true, 
-      items: [], 
-      provider: 'error-fallback',
-      error: error.message 
+    res.json({ 
+      ok:true, 
+      items, 
+      provider:'enhanced-apify-system', 
+      stats:{ 
+        scraped: items.filter(i=>!i.needsComments).length, 
+        social: items.filter(i=>i.needsComments).length, 
+        total: items.length 
+      } 
     });
+  } catch (e) { 
+    console.error('Scrape endpoint error:', e);
+    res.json({ ok:true, items:[], provider:'error-fallback', error:e.message }); 
   }
 });
 
-// 2) Enhanced Comments endpoint
-app.post('/api/comments', async (req, res) => {
+// 2) Comments (public signals)
+app.post('/api/comments', rejectIfHeaderTriesCookies, async (req, res) => {
   try {
-    const { url, city = '', state = '' } = req.body || {};
-    if (!url) return res.status(400).json({ ok: false, error: 'url required' });
-
-    let host;
-    try { 
-      host = new URL(url).hostname.replace(/^www\./, ''); 
-    } catch { 
-      return res.status(400).json({ ok: false, error: 'invalid url' }); 
+    const body = req.body || {};
+    const { url, city = '', state = '' } = body;
+    if (!url) return res.status(400).json({ ok:false, error:'url required' });
+    
+    let urlObj;
+    try {
+      urlObj = new URL(url);
+    } catch (e) {
+      return res.status(400).json({ ok:false, error:'Invalid URL format' });
     }
-
+    
+    const host = urlObj.hostname.replace(/^www\./,'');
     const items = [];
-    console.log('🔍 Processing URL:', url, 'Platform:', host);
 
-    // YouTube Processing
+    // YouTube
     if (/youtube\.com|youtu\.be/i.test(host)) {
       const key = process.env.YOUTUBE_API_KEY;
-      let vid = (url.match(/[?&]v=([^&#]+)/) || [])[1];
-      if (!vid) {
-        const u = new URL(url);
-        if (u.hostname.includes('youtu.be')) vid = u.pathname.split('/').filter(Boolean)[0] || '';
-        if (!vid && u.pathname.startsWith('/shorts/')) vid = u.pathname.split('/')[2] || '';
+      let vid = null;
+      try {
+        const vidMatch = url.match(/[?&]v=([^&#]+)/);
+        if (vidMatch && vidMatch[1]) {
+          vid = vidMatch[1];
+        } else if (urlObj.hostname.includes('youtu.be')) {
+          const pathParts = urlObj.pathname.split('/').filter(Boolean);
+          vid = pathParts[0] || '';
+        } else if (urlObj.pathname.startsWith('/shorts/')) {
+          const pathParts = urlObj.pathname.split('/');
+          vid = pathParts[2] || '';
+        }
+      } catch (e) {
+        console.error('YouTube URL parsing error:', e);
       }
       
       if (key && vid) {
         try {
-          const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', {
-            params: { part: 'snippet', videoId: vid, maxResults: 50, key }
+          const yt = await axios.get('https://www.googleapis.com/youtube/v3/commentThreads', { 
+            params:{ part:'snippet', videoId:vid, maxResults:50, key },
+            timeout: 15000
           });
-          for (const row of (yt.data.items || [])) {
-            const sn = row.snippet.topLevelComment.snippet;
-            items.push({
-              platform: 'youtube',
-              author: sn.authorDisplayName,
-              text: sn.textDisplay,
-              publishedAt: sn.publishedAt
-            });
-          }
-        } catch (ytError) {
-          console.error('YouTube API error:', ytError.message);
-        }
-      }
-      
-      if (items.length === 0) {
-        items.push({
-          platform: 'youtube',
-          author: 'youtube_user',
-          text: `Real estate video engagement detected for ${city}`,
-          publishedAt: new Date().toISOString(),
-          synthetic: true
-        });
-      }
-      
-      return res.json({ ok: true, url, city, state, items, provider: 'youtube-enhanced' });
-    }
-
-    // Zillow Processing
-    if (/zillow\.com/i.test(host)) {
-      console.log('🏠 Processing Zillow URL for buyer activity signals');
-      
-      try {
-        const zillowResponse = await axios.get(url, {
-          timeout: 20000,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          }
-        });
-        
-        const html = zillowResponse.data;
-        const buyerSignals = extractZillowBuyerSignals(html);
-        
-        for (const signal of buyerSignals) {
-          items.push({
-            platform: 'zillow',
-            author: 'zillow_activity',
-            text: signal.text,
-            publishedAt: new Date().toISOString(),
-            activityType: signal.type,
-            propertyData: signal.propertyData,
-            buyerIndicator: signal.buyerIndicator
-          });
-        }
-        
-      } catch (zillowError) {
-        console.error('Zillow processing error:', zillowError.message);
-        
-        items.push({
-          platform: 'zillow',
-          author: 'zillow_intelligence',
-          text: `Zillow property activity detected in ${city}. Property viewing and buyer interest signals identified.`,
-          publishedAt: new Date().toISOString(),
-          synthetic: true
-        });
-      }
-      
-      return res.json({ 
-        ok: true, 
-        url, 
-        city, 
-        state, 
-        items, 
-        provider: 'zillow-buyer-intelligence'
-      });
-    }
-
-    // Reddit Processing
-    if (/reddit\.com/i.test(host)) {
-      try {
-        const apifyResults = await runApifyWithBackups([url]);
-        
-        if (apifyResults && apifyResults.length > 0) {
-          for (const r of apifyResults) {
-            if (Array.isArray(r.comments)) {
-              for (const c of r.comments.slice(0, 20)) {
-                items.push({
-                  platform: 'reddit',
-                  author: c.author,
-                  text: c.text,
-                  publishedAt: c.createdAt
+          const ytItems = yt.data?.items || [];
+          for (const row of ytItems) {
+            try {
+              const sn = row?.snippet?.topLevelComment?.snippet;
+              if (sn) {
+                items.push({ 
+                  platform:'youtube', 
+                  author: sn.authorDisplayName || 'Unknown', 
+                  text: sn.textDisplay || '', 
+                  publishedAt: sn.publishedAt || new Date().toISOString() 
                 });
               }
+            } catch (e) {
+              console.error('YouTube comment parsing error:', e);
+            }
+          }
+        } catch (e) {
+          console.error('YouTube API error:', e);
+        }
+      }
+      if (!items.length) items.push({ platform:'youtube', author:'youtube_user', text:`Real estate video engagement detected for ${city}`, publishedAt:new Date().toISOString(), synthetic:true });
+      return res.json({ ok:true, url, city, state, items, provider:'youtube-enhanced' });
+    }
+
+    // Zillow
+    if (/zillow\.com/i.test(host)) {
+      try {
+        const r = await axios.get(url, { 
+          timeout: 20000, 
+          headers: stripForbidden({ 'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }) 
+        });
+        const sig = extractZillowBuyerSignals(r.data);
+        sig.forEach(s=>items.push({ 
+          platform:'zillow', 
+          author:'zillow_activity', 
+          text:s.text, 
+          publishedAt:new Date().toISOString(), 
+          activityType:s.type, 
+          propertyData:s.propertyData, 
+          buyerIndicator:s.buyerIndicator 
+        }));
+      } catch (e) {
+        console.error('Zillow scraping error:', e);
+      }
+      if (!items.length) items.push({ platform:'zillow', author:'zillow_intelligence', text:`Zillow property activity detected in ${city}`, publishedAt:new Date().toISOString(), synthetic:true });
+      return res.json({ ok:true, url, city, state, items, provider:'zillow-buyer-intel' });
+    }
+
+    // Reddit
+    if (/reddit\.com/i.test(host)) {
+      try {
+        const ap = await runApifyWithBackups([url]);
+        for (const r of (ap||[])) {
+          if (Array.isArray(r.comments)) {
+            for (const c of r.comments.slice(0,20)) {
+              items.push({ 
+                platform:'reddit', 
+                author: c?.author || 'reddit_user', 
+                text: c?.text || '', 
+                publishedAt: c?.createdAt || new Date().toISOString() 
+              });
             }
           }
         }
-      } catch (redditError) {
-        console.error('Reddit error:', redditError.message);
+      } catch (e) {
+        console.error('Reddit scraping error:', e);
       }
-      
-      if (items.length === 0) {
-        items.push({
-          platform: 'reddit',
-          author: 'reddit_user', 
-          text: `Reddit real estate discussion detected in ${city}`,
-          publishedAt: new Date().toISOString(),
-          synthetic: true
-        });
-      }
-      
-      return res.json({ ok: true, url, city, state, items, provider: 'reddit-enhanced' });
+      if (!items.length) items.push({ platform:'reddit', author:'reddit_user', text:`Reddit real estate discussion in ${city}`, publishedAt:new Date().toISOString(), synthetic:true });
+      return res.json({ ok:true, url, city, state, items, provider:'reddit-enhanced' });
     }
 
-    // All Other Platforms
+    // Generic
     const platformName = getPlatformName(host);
-    items.push({
-      platform: platformName,
-      author: `${platformName}_user`,
-      text: `${platformName.charAt(0).toUpperCase() + platformName.slice(1)} real estate engagement detected in ${city}`,
-      publishedAt: new Date().toISOString(),
-      synthetic: true
-    });
-    
-    return res.json({ 
-      ok: true, 
-      url, 
-      city, 
-      state, 
-      items, 
-      provider: `${platformName}-placeholder`
-    });
-
-  } catch (error) {
-    console.error('Comments endpoint error:', error.message);
-    
-    return res.json({ 
-      ok: true,
+    items.push({ platform: platformName, author:`${platformName}_user`, text:`${platformName} engagement detected in ${city}`, publishedAt:new Date().toISOString(), synthetic:true });
+    res.json({ ok:true, url, city, state, items, provider:`${platformName}-placeholder` });
+  } catch (e) {
+    console.error('Comments endpoint error:', e);
+    res.json({ 
+      ok:true, 
       url: req.body?.url || '', 
-      city: req.body?.city || '',
-      state: req.body?.state || '',
-      items: [{
-        platform: 'error-recovery',
-        author: 'system',
-        text: `Social media monitoring detected potential real estate interest. Processing error: ${error.message}`,
-        publishedAt: new Date().toISOString(),
-        synthetic: true
-      }],
-      provider: 'error-fallback',
-      error: error.message
+      city: req.body?.city || '', 
+      state: req.body?.state || '', 
+      items:[{ 
+        platform:'error-recovery', 
+        author:'system', 
+        text:`Processing error: ${e.message}`, 
+        publishedAt:new Date().toISOString(), 
+        synthetic:true 
+      }], 
+      provider:'error-fallback', 
+      error:e.message 
     });
   }
 });
 
-// 3) Discovery endpoint
-app.post('/api/discover', async (req, res) => {
-  const startTime = Date.now();
-  
+// 3) Discovery (Perplexity-assisted public discovery)
+app.post('/api/discover', async (req,res)=>{
+  const t0 = Date.now();
   try {
     const perplex = client('perplexity');
-    const { queries = [], location = {}, locations = [], maxResults = 40 } = req.body || {};
-
+    const body = req.body || {};
+    const { queries = [], location = {}, locations = [], maxResults = 40 } = body;
     const qList = Array.isArray(queries) ? queries : [];
-    const locs = Array.isArray(locations) && locations.length ? locations.slice(0, 2) : [location];
-
-    const allItems = [];
-    const seen = new Set();
-
-    if (perplex && qList.length > 0) {
-      try {
-        for (const loc of locs.slice(0, 2)) {
-          const cleanQueries = qList.slice(0, 8).map(q => {
-            const cleanQ = q.replace(new RegExp(`\\s+${loc.city}\\s+${loc.state}`, 'gi'), '');
-            return `${cleanQ} ${loc.city} ${loc.state}`;
-          });
-          
-          for (const query of cleanQueries.slice(0, 4)) {
-            try {
-              const payload = {
-                model: 'sonar-pro',
-                messages: [
-                  { 
-                    role: 'system', 
-                    content: 'You are a buyer lead researcher. Find people who want to BUY homes.' 
-                  },
-                  { 
-                    role: 'user', 
-                    content: `Find potential home BUYERS: ${query}` 
-                  }
-                ],
-                stream: false,
-                max_tokens: 600,
-                search_recency_filter: 'month'
-              };
-
-              const response = await perplex.post('/chat/completions', payload, {
-                timeout: 25000
-              });
-              
-              const data = response.data || {};
-
-              if (data.search_results && Array.isArray(data.search_results)) {
-                for (const result of data.search_results.slice(0, 6)) {
-                  if (result.url && result.url.startsWith('http')) {
-                    const item = {
-                      title: result.title || 'Buyer Intent Content',
-                      url: result.url,
-                      platform: getPlatformFromUrl(result.url),
-                      contentSnippet: result.snippet || 'Content related to home buying interest',
-                      city: loc.city,
-                      state: loc.state,
-                      queryType: query,
-                      buyerRelevance: 5
-                    };
-                    
-                    if (!seen.has(item.url)) {
-                      seen.add(item.url);
-                      allItems.push(item);
-                    }
-                  }
+    const locs = Array.isArray(locations) && locations.length ? locations.slice(0,2) : [location];
+    const all = [], seen = new Set();
+    
+    if (perplex && qList.length) {
+      for (const loc of locs.slice(0,2)) {
+        const cleanQs = qList.slice(0,8).map(q => `${q} ${loc.city||''} ${loc.state||''}`.trim());
+        for (const q of cleanQs.slice(0,4)) {
+          try {
+            const r = await perplex.post('/chat/completions', {
+              model:'sonar-pro',
+              messages:[
+                { role:'system', content:'Find public BUYER intent mentions. Return relevant links.' },
+                { role:'user', content:`Find home BUYERS: ${q}` }
+              ],
+              stream:false, max_tokens:600, search_recency_filter:'month'
+            }, { timeout:25000 });
+            
+            const data = r.data||{};
+            if (data.search_results && Array.isArray(data.search_results)) {
+              for (const rs of data.search_results.slice(0,6)) {
+                if (rs.url && rs.url.startsWith('http') && !seen.has(rs.url)) {
+                  seen.add(rs.url);
+                  all.push({ 
+                    title: rs.title || 'Buyer Intent Content', 
+                    url: rs.url, 
+                    platform: getPlatformFromUrl(rs.url), 
+                    contentSnippet: rs.snippet || '', 
+                    city: loc.city, 
+                    state: loc.state, 
+                    queryType: q, 
+                    buyerRelevance: 5 
+                  });
                 }
               }
-
-              if (data.choices?.[0]?.message?.content) {
-                const content = data.choices[0].message.content;
-                const urls = extractUrlsFromText(content);
-                
-                for (const url of urls.slice(0, 3)) {
-                  if (url.startsWith('http')) {
-                    const item = {
-                      title: 'AI Discovery',
-                      url: url,
-                      platform: getPlatformFromUrl(url),
-                      contentSnippet: 'Found via AI search',
-                      city: loc.city,
-                      state: loc.state,
-                      queryType: query,
-                      buyerRelevance: 4
-                    };
-                    
-                    if (!seen.has(item.url)) {
-                      seen.add(item.url);
-                      allItems.push(item);
-                    }
-                  }
-                }
-              }
-
-            } catch (queryError) {
-              console.log(`⚠️ Query timeout, continuing...`);
             }
             
-            await new Promise(resolve => setTimeout(resolve, 1500));
+            const content = data.choices?.[0]?.message?.content;
+            if (content) {
+              for (const u of extractUrlsFromText(content).slice(0,3)) {
+                if (!seen.has(u)) { 
+                  seen.add(u); 
+                  all.push({ 
+                    title:'AI Discovery', 
+                    url:u, 
+                    platform:getPlatformFromUrl(u), 
+                    contentSnippet:'Found via AI search', 
+                    city:loc.city, 
+                    state:loc.state, 
+                    queryType:q, 
+                    buyerRelevance:4 
+                  }); 
+                }
+              }
+            }
+          } catch (e) {
+            console.error('Perplexity query error:', e);
           }
-        }
-
-      } catch (error) {
-        console.error('🚨 Perplexity error:', error.message);
-      }
-    }
-
-    // Enhanced fallback
-    if (allItems.length < 15) {
-      for (const loc of locs.slice(0, 2)) {
-        const fallbackItems = [
-          {
-            title: `Reddit - Pre-approved buyer looking for agent in ${loc.city}`,
-            url: `https://www.reddit.com/r/RealEstate/comments/pre_approved_buyer_${loc.city.toLowerCase()}`,
-            platform: 'reddit',
-            contentSnippet: `"Just got pre-approved for $350k, looking for a good realtor in ${loc.city}"`,
-            city: loc.city,
-            state: loc.state,
-            buyerRelevance: 9
-          },
-          {
-            title: `Facebook - Military family needs to buy house in ${loc.city}`,
-            url: `https://www.facebook.com/groups/military${loc.city.toLowerCase()}/posts/${Date.now()}`,
-            platform: 'facebook',
-            contentSnippet: `"PCS orders to ${loc.city}, need to buy house ASAP"`,
-            city: loc.city,
-            state: loc.state,
-            buyerRelevance: 10
-          }
-        ];
-        
-        for (const item of fallbackItems) {
-          if (!seen.has(item.url)) {
-            seen.add(item.url);
-            allItems.push(item);
-          }
+          await new Promise(r=>setTimeout(r,1200));
         }
       }
     }
-
-    const improvedItems = allItems
-      .filter(item => item.url && item.url.startsWith('http'))
-      .slice(0, maxResults);
-
-    const processingTime = Date.now() - startTime;
-
-    return res.json({
-      ok: true,
-      items: improvedItems,
-      provider: improvedItems.length > 10 ? 'perplexity-buyer-focused' : 'buyer-fallback',
-      locations: locs,
-      processingTime
+    res.json({ 
+      ok:true, 
+      items: all.slice(0,maxResults), 
+      provider: all.length>10?'perplexity-buyer-focused':'buyer-fallback', 
+      locations:locs, 
+      processingTime: Date.now()-t0 
     });
-
-  } catch (error) {
-    console.error('💥 Discovery error:', error.message);
-    return res.json({ 
-      ok: true, 
-      items: [], 
-      provider: 'error-fallback',
-      processingTime: Date.now() - startTime
-    });
+  } catch (e) { 
+    console.error('Discovery endpoint error:', e);
+    res.json({ ok:true, items:[], provider:'error-fallback', processingTime: Date.now()-t0 }); 
   }
 });
 
-// 4) Fuse + Score
-app.post('/api/fuse-score', (req, res) => {
+// 4) Fuse + Score (simple textual intent scoring)
+app.post('/api/fuse-score', (req,res)=>{
   try {
-    const { items = [], location = {} } = req.body || {};
-    const CITY = String(location.city || '').toLowerCase();
-
-    const leads = items.map(r => {
-      const txt = String(r.content || '').toLowerCase();
-      let base = 0;
-      
-      if (txt.includes('looking for') || txt.includes('searching for')) base += 3;
-      if (txt.includes('buy') || txt.includes('purchase')) base += 3;
-      if (txt.includes('agent') || txt.includes('realtor')) base += 2;
-      if (txt.includes('pre-approved') || txt.includes('pre approved')) base += 4;
-      if (txt.includes('cash buyer')) base += 4;
-      if (txt.includes('urgent') || txt.includes('asap')) base += 3;
-      if (txt.includes('moving') || txt.includes('relocating')) base += 2;
-      
-      if (CITY && txt.includes(CITY)) base += 1;
-
-      const score = Math.max(0, Math.min(10, base));
-
-      return {
-        source: r.source || 'public',
-        platform: r.platform || 'web',
-        url: r.url,
-        content: r.content,
-        signals: r.signals || [],
-        finalIntentScore: score,
-        urgency: score>=8?'immediate':score>=6?'high':score>=4?'medium':'low',
-        timeline: score>=8?'1-14 days':score>=6?'2-8 weeks':score>=4?'2-6 months':'6+ months',
-        city: location.city || 'Unknown',
-        state: location.state || 'Unknown',
-        timestamp: new Date().toISOString()
-      };
+    const body = req.body || {};
+    const { items = [], location = {} } = body;
+    const CITY = String(location.city||'').toLowerCase();
+    
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ ok:false, error:'items must be an array' });
+    }
+    
+    const leads = items.map(r=>{
+      try {
+        const txt = String(r.content || r.contentSnippet || '').toLowerCase();
+        let base = 0;
+        if (txt.includes('looking for') || txt.includes('searching for')) base += 3;
+        if (txt.includes('buy') || txt.includes('purchase')) base += 3;
+        if (txt.includes('agent') || txt.includes('realtor')) base += 2;
+        if (txt.includes('pre-approved') || txt.includes('pre approved')) base += 4;
+        if (txt.includes('cash buyer')) base += 4;
+        if (txt.includes('urgent') || txt.includes('asap')) base += 3;
+        if (txt.includes('moving') || txt.includes('relocating')) base += 2;
+        if (CITY && txt.includes(CITY)) base += 1;
+        const score = Math.max(0, Math.min(10, base));
+        return { 
+          ...r,
+          finalIntentScore: score,
+          urgency: score>=8?'immediate':score>=6?'high':score>=4?'medium':'low',
+          timeline: score>=8?'1-14 days':score>=6?'2-8 weeks':score>=4?'2-6 months':'6+ months',
+          timestamp: new Date().toISOString()
+        };
+      } catch (e) {
+        console.error('Score calculation error for item:', e);
+        return { 
+          ...r,
+          finalIntentScore: 0,
+          urgency: 'low',
+          timeline: '6+ months',
+          timestamp: new Date().toISOString()
+        };
+      }
     });
-
     res.json({ leads });
-  } catch (e) {
-    console.error('fuse-score error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'fuse-score failed' });
+  } catch (e) { 
+    console.error('Fuse-score error:', e);
+    res.status(500).json({ ok:false, error:'fuse-score failed' }); 
   }
 });
 
-// 5) Content generation
-app.post('/api/content-generation', async (req, res) => {
+// 5) Content generation (Fair Housing system prompt)
+app.post('/api/content-generation', async (req,res)=>{
   try {
-    const { location = {}, lead = {} } = req.body || {};
+    const body = req.body || {};
+    const { location = {}, lead = {} } = body;
     const key = process.env.ANTHROPIC_API_KEY;
     
     if (!key) {
       return res.json({
-        smsA: `Hi ${lead.firstName||'there'}! Quick question about ${location.city||'your area'} homes.`.slice(0,160),
-        smsB: `Hello! Want a short ${location.city||'your area'} market update?`.slice(0,160),
-        emailSubjectA: `${location.city||'Your area'} market snapshot for you`,
-        emailBodyA: `Hi ${lead.firstName||'there'},\nHere's a helpful update.`,
-        emailSubjectB: `Quick ${location.city||'Your area'} real estate insights`,
-        emailBodyB: `Hi ${lead.firstName||'there'},\nSome useful info for your search.`,
-        videoScript: `Hi ${lead.firstName||'there'}, quick update on ${location.city||'your area'} and how I can help.`,
-        provider: 'mock'
+        smsA:`Hi ${lead.firstName||'there'}! Quick question about ${location.city||'your area'} homes.`.slice(0,160),
+        smsB:`Hello! Want a short ${location.city||'your area'} market update?`.slice(0,160),
+        emailSubjectA:`${location.city||'Your area'} market snapshot for you`,
+        emailBodyA:`Hi ${lead.firstName||'there'},\nHere's a helpful update.`,
+        emailSubjectB:`Quick ${location.city||'Your area'} real estate insights`,
+        emailBodyB:`Hi ${lead.firstName||'there'},\nSome useful info for your search.`,
+        videoScript:`Hi ${lead.firstName||'there'}, quick update on ${location.city||'your area'} and how I can help.`,
+        provider:'mock'
       });
     }
     
     const anthropic = makeClient({ 
       baseURL:'https://api.anthropic.com', 
       headers:{ 
-        'x-api-key': key, 
+        'x-api-key':key, 
         'anthropic-version':'2023-06-01',
         'content-type':'application/json' 
       } 
     });
     
+    if (!anthropic) {
+      throw new Error('Failed to create Anthropic client');
+    }
+    
     const r = await anthropic.post('/v1/messages', {
       model: 'claude-3-haiku-20240307',
       max_tokens: 900,
       system: 'You are a Fair Housing–compliant real estate copywriter. No steering.',
-      messages: [{
-        role: 'user',
-        content: `Return STRICT JSON with keys: smsA, smsB, emailSubjectA, emailBodyA, emailSubjectB, emailBodyB, videoScript. Lead=${JSON.stringify(lead)}; City=${location.city}.`
+      messages: [{ 
+        role:'user', 
+        content:`Return STRICT JSON with keys: smsA, smsB, emailSubjectA, emailBodyA, emailSubjectB, emailBodyB, videoScript. Lead=${JSON.stringify(lead)}; City=${location.city}.` 
       }]
     });
-    
     res.json(r.data);
-  } catch (e) {
-    console.error('content-generation error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'content-generation failed' });
+  } catch (e) { 
+    console.error('Content generation error:', e);
+    res.status(500).json({ ok:false, error:'content-generation failed' }); 
   }
 });
 
 // 6) HeyGen passthrough
-app.post('/api/heygen/video', async (req, res) => {
+app.post('/api/heygen/video', async (req,res)=>{
   try {
     const key = process.env.HEYGEN_API_KEY;
     if (!key) return res.status(400).json({ ok:false, error:'HEYGEN_API_KEY not set' });
-    
-    const heygen = makeClient({ 
-      baseURL:'https://api.heygen.com', 
-      headers:{ 'X-API-Key': key, 'content-type':'application/json' } 
-    });
-    
-    const r = await heygen.post('/v2/video/generate', req.body);
+    const hey = makeClient({ baseURL:'https://api.heygen.com', headers:{ 'X-API-Key': key, 'content-type':'application/json' } });
+    if (!hey) return res.status(500).json({ ok:false, error:'Failed to create HeyGen client' });
+    const r = await hey.post('/v2/video/generate', req.body);
     res.json(r.data);
-  } catch (e) {
-    console.error('heygen error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'heygen failed' });
+  } catch (e) { 
+    console.error('HeyGen error:', e);
+    res.status(500).json({ ok:false, error:'heygen failed' }); 
   }
 });
 
-// 7) Apollo Enrich
-app.post('/api/apollo/enrich', async (req, res) => {
+// 7) Apollo enrich
+app.post('/api/apollo/enrich', async (req,res)=>{
   try {
     const apollo = client('apollo');
     if (!apollo) return res.status(400).json({ ok:false, error:'APOLLO_API_KEY not set' });
-    
     const r = await apollo.post('/v1/people/enrich', req.body);
     res.json(r.data);
-  } catch (e) {
-    console.error('apollo error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'apollo failed' });
+  } catch (e) { 
+    console.error('Apollo error:', e);
+    res.status(500).json({ ok:false, error:'apollo failed' }); 
   }
 });
 
-// 8) IDX Leads
-app.get('/api/idx/leads', async (req, res) => {
+// 8) IDX leads
+app.get('/api/idx/leads', async (_req,res)=>{
   try {
     const idx = client('idx');
     if (!idx) return res.status(400).json({ ok:false, error:'IDX_ACCESS_KEY not set' });
-    
     const r = await idx.get('/leads/lead');
     res.json(r.data);
-  } catch (e) {
-    console.error('idx error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'idx failed' });
+  } catch (e) { 
+    console.error('IDX error:', e);
+    res.status(500).json({ ok:false, error:'idx failed' }); 
   }
 });
 
 // 9) Public records passthrough
-app.post('/api/public-records', async (req, res) => {
+app.post('/api/public-records', async (req,res)=>{
   try {
-    const { url } = req.body || {};
+    const body = req.body || {};
+    const { url } = body;
     if (!url) return res.status(400).json({ ok:false, error:'url required' });
+    
+    // Validate URL
+    try {
+      new URL(url);
+    } catch (e) {
+      return res.status(400).json({ ok:false, error:'Invalid URL format' });
+    }
     
     const r = await axios.get(url, { timeout: 20000 });
     res.json({ items: r.data });
-  } catch (e) {
-    console.error('public-records error:', e?.response?.data || e.message);
-    res.status(500).json({ ok:false, error:'public-records failed' });
+  } catch (e) { 
+    console.error('Public records error:', e);
+    res.status(500).json({ ok:false, error:'public-records failed' }); 
   }
 });
 
-// 10) Mortgage events ingest
-app.post('/api/mortgage-event', (req, res) => {
-  const payload = req.body || {};
-  console.log('Mortgage event:', payload.event, 'for', payload?.contact?.email || payload?.contact?.phone);
-  res.json({ ok:true });
+// 10) Mortgage event, 11) Analytics
+app.post('/api/mortgage-event', (req,res)=>{ 
+  try {
+    const p = req.body||{}; 
+    console.log('Mortgage event:', p.event, 'for', p?.contact?.email||p?.contact?.phone); 
+    res.json({ok:true});
+  } catch (e) {
+    console.error('Mortgage event error:', e);
+    res.json({ok:false, error:e.message});
+  }
 });
 
-// 11) Analytics + webhook
-app.post('/api/analytics-tracking', (req, res) => {
-  console.log('Analytics:', req.body?.event, req.body?.metrics);
-  res.json({ ok:true });
+app.post('/api/analytics-tracking', (req,res)=>{ 
+  try {
+    console.log('Analytics:', req.body?.event, req.body?.metrics); 
+    res.json({ok:true});
+  } catch (e) {
+    console.error('Analytics tracking error:', e);
+    res.json({ok:false, error:e.message});
+  }
 });
 
-app.post('/webhooks/video-complete', (req, res) => {
-  console.log('Video complete payload:', req.body);
-  res.json({ ok:true });
+app.post('/webhooks/video-complete', (req,res)=>{ 
+  try {
+    console.log('Video complete payload:', req.body); 
+    res.json({ok:true});
+  } catch (e) {
+    console.error('Video complete webhook error:', e);
+    res.json({ok:false, error:e.message});
+  }
 });
 
 // 12) Market report placeholder
-app.post('/api/market-report', async (req, res) => {
-  const { city='', state='' } = req.body || {};
-  return res.json({ 
-    ok:true, 
-    report_url:`https://example.com/market-report-${encodeURIComponent(city)}-${encodeURIComponent(state)}.pdf` 
-  });
+app.post('/api/market-report', (req,res)=>{
+  try {
+    const body = req.body || {};
+    const { city='', state='' } = body;
+    res.json({ ok:true, report_url:`https://example.com/market-report-${encodeURIComponent(city)}-${encodeURIComponent(state)}.pdf` });
+  } catch (e) {
+    console.error('Market report error:', e);
+    res.status(500).json({ ok:false, error:'market-report failed' });
+  }
 });
 
-// 13) Performance digest placeholder
-app.get('/api/performance/digest', (req, res) => {
-  const hours = Number(req.query.hours || 24);
-  res.json({
-    ok:true,
-    stats:{
-      windowHours: hours,
-      totalLeads: 0,
-      intentDistribution: { immediate:0, high:0, medium:0, low:0 },
-      sourceBreakdown: { public:0, idx:0 },
-      topSignals:[]
-    }
-  });
+// 13) Performance digest
+app.get('/api/performance/digest', (req,res)=>{
+  try {
+    const hours = Number(req.query.hours) || 24;
+    res.json({ 
+      ok:true, 
+      stats:{ 
+        windowHours:hours, 
+        totalLeads:0, 
+        intentDistribution:{ immediate:0, high:0, medium:0, low:0 }, 
+        sourceBreakdown:{ public:0, idx:0 }, 
+        topSignals:[] 
+      } 
+    });
+  } catch (e) {
+    console.error('Performance digest error:', e);
+    res.status(500).json({ ok:false, error:'performance-digest failed' });
+  }
 });
 
 // 14) Test Instagram session
-app.get('/api/test-instagram', async (req, res) => {
-  const session = process.env.IG_SESSIONID;
-  
-  if (!session) {
-    return res.json({ error: 'No IG_SESSIONID in environment' });
-  }
-  
+app.get('/api/test-instagram', async (_req,res)=>{
   try {
-    const testResponse = await axios.get('https://www.instagram.com/api/v1/users/web_profile_info/?username=instagram', {
-      headers: {
-        'Cookie': `sessionid=${session}`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      timeout: 10000
+    const session = process.env.IG_SESSIONID;
+    if (!session) return res.json({ error:'No IG_SESSIONID in environment' });
+    
+    const r = await axios.get('https://www.instagram.com/api/v1/users/web_profile_info/?username=instagram', { 
+      headers: { 
+        'Cookie': `sessionid=${session}`, 
+        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' 
+      }, 
+      timeout:10000 
+    });
+    return res.json({ success:true, sessionValid:r.status===200, sessionLength: session.length });
+  } catch (e) { 
+    console.error('Instagram test error:', e);
+    return res.json({ success:false, error:e.message, sessionLength: process.env.IG_SESSIONID?.length || 0 }); 
+  }
+});
+
+// 15) Google CSE discovery
+app.post('/api/google/cse', async (req,res)=>{
+  try {
+    const key = process.env.GOOGLE_CSE_KEY;
+    const cx  = process.env.GOOGLE_CSE_CX;
+    if (!key || !cx) return res.status(400).json({ ok:false, error:'GOOGLE_CSE_KEY/GOOGLE_CSE_CX not set' });
+    
+    const body = req.body || {};
+    const { queries = [], num = 8, dateRestrict = 'm1' } = body;
+    
+    if (!Array.isArray(queries)) {
+      return res.status(400).json({ ok:false, error:'queries must be an array' });
+    }
+    
+    const g = makeClient({ baseURL:'https://www.googleapis.com' });
+    if (!g) return res.status(500).json({ ok:false, error:'Failed to create Google client' });
+    
+    const results = [], uniq = new Set();
+    for (const q of queries.slice(0,20)) {
+      try {
+        const r = await g.get('/customsearch/v1', { 
+          params:{ key, cx, q, num: Math.min(num,10), dateRestrict },
+          timeout: 15000
+        });
+        const items = r.data?.items || [];
+        for (const it of items) {
+          if (!it.link || uniq.has(it.link)) continue;
+          uniq.add(it.link);
+          results.push({ 
+            title: it.title || 'Result', 
+            url: it.link, 
+            snippet: it.snippet || '', 
+            displayLink: it.displayLink || '', 
+            source:'google-cse', 
+            query:q, 
+            formattedUrl: it.formattedUrl || '' 
+          });
+        }
+        await new Promise(r => setTimeout(r, 400));
+      } catch (e) {
+        console.error('Google CSE query error:', e);
+      }
+    }
+    res.json({ ok:true, items:results, totalQueries:queries.length });
+  } catch (e) { 
+    console.error('Google CSE error:', e);
+    res.json({ ok:true, items:[], error:e.message }); 
+  }
+});
+
+// 16) OSINT resolve (public profile links)
+app.post('/api/osint/resolve', async (req,res)=>{
+  try {
+    const body = req.body || {};
+    const { handle = '', fullName = '', city = '', state = '' } = body;
+    const qBase = [handle, fullName, city, state].filter(Boolean).join(' ');
+    if (!qBase) return res.json({ ok:true, candidates: [] });
+    
+    const perplex = client('perplexity');
+    const queries = [
+      `contact for ${qBase}`,
+      `${qBase} instagram OR facebook OR reddit OR youtube`,
+      `${qBase} email OR "mailto"`,
+      `${qBase} realtor OR agent`
+    ];
+    const candidates = [], seen = new Set();
+    
+    if (perplex) {
+      for (const q of queries.slice(0,4)) {
+        try {
+          const r = await perplex.post('/chat/completions', {
+            model:'sonar-pro',
+            messages:[
+              { role:'system', content:'Return concise, public OSINT only. No private data.' },
+              { role:'user', content:`Find public profile/name/links for: ${q}. Give JSON: [{name, handle, platform, link}]` }
+            ],
+            max_tokens: 600, stream:false, search_recency_filter:'year'
+          }, { timeout:22000 });
+          
+          const text = JSON.stringify(r.data || {});
+          const urlMatches = text.match(/https?:\/\/[^\s"']+/g) || [];
+          const urls = urlMatches.slice(0, 10);
+          
+          for (const link of urls) {
+            if (seen.has(link)) continue;
+            seen.add(link);
+            let plat = 'web';
+            if (/instagram\.com/i.test(link)) plat = 'instagram';
+            else if (/facebook\.com/i.test(link)) plat = 'facebook';
+            else if (/reddit\.com/i.test(link)) plat = 'reddit';
+            else if (/youtube\.com|youtu\.be/i.test(link)) plat = 'youtube';
+            else if (/tiktok\.com/i.test(link)) plat = 'tiktok';
+            else if (/linkedin\.com/i.test(link)) plat = 'linkedin';
+            else if (/twitter\.com|x\.com/i.test(link)) plat = 'twitter';
+            
+            candidates.push({ 
+              name: fullName || '', 
+              handle: handle || '', 
+              platform: plat, 
+              link, 
+              confidence: plat!=='web'?0.8:0.5, 
+              source:'perplexity-osint' 
+            });
+          }
+        } catch (e) {
+          console.error('OSINT query error:', e);
+        }
+        await new Promise(r=>setTimeout(r, 900));
+      }
+    }
+    
+    // dedupe & sort
+    const unique = [];
+    const linkset = new Set();
+    for (const c of candidates) {
+      if (!linkset.has(c.link)) { 
+        linkset.add(c.link); 
+        unique.push(c); 
+      }
+    }
+    
+    unique.sort((a,b)=> {
+      const aScore = a.confidence + (['instagram','facebook','linkedin'].includes(a.platform)?3: ['reddit','youtube','twitter'].includes(a.platform)?2:1);
+      const bScore = b.confidence + (['instagram','facebook','linkedin'].includes(b.platform)?3: ['reddit','youtube','twitter'].includes(b.platform)?2:1);
+      return bScore - aScore;
     });
     
-    return res.json({ 
-      success: true, 
-      sessionValid: testResponse.status === 200,
-      sessionLength: session.length 
-    });
-  } catch (e) {
-    return res.json({ 
-      success: false, 
-      error: e.message,
-      sessionLength: session.length 
-    });
+    res.json({ ok:true, candidates: unique.slice(0,15) });
+  } catch (e) { 
+    console.error('OSINT resolve error:', e);
+    res.json({ ok:true, candidates: [], error:e.message }); 
   }
 });
 
-// ========== ERROR HANDLING & SERVER STARTUP ==========
-
-// Global error handler
-app.use((err, _req, res, _next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ ok:false, error:'server error' });
+// 17) OSINT: sniff public emails from a URL
+app.post('/api/osint/sniff-emails', async (req,res)=>{
+  try {
+    const body = req.body || {};
+    const { url } = body;
+    if (!url) return res.status(400).json({ ok:false, error:'url required' });
+    
+    // Validate URL
+    try {
+      new URL(url);
+    } catch (e) {
+      return res.status(400).json({ ok:false, error:'Invalid URL format' });
+    }
+    
+    const r = await axios.get(url, {
+      timeout: 15000,
+      headers: stripForbidden({
+        'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      })
+    });
+    
+    const html = String(r.data||'');
+    const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+    const emailMatches = html.match(emailRegex) || [];
+    const found = Array.from(new Set(emailMatches.map(e=>e.toLowerCase())))
+      .filter(e => !/noreply|no-reply|example\.com/.test(e))
+      .slice(0, 10);
+    res.json({ ok:true, emails: found, url });
+  } catch (e) { 
+    console.error('Email sniffing error:', e);
+    res.json({ ok:true, emails: [], error:e.message }); 
+  }
 });
 
-// Server startup
+// 18) URLScan submit/result
+app.post('/api/urlscan/lookup', async (req,res)=>{
+  try {
+    const body = req.body || {};
+    const { url } = body;
+    if (!url) return res.status(400).json({ ok:false, error:'url required' });
+    
+    // Validate URL
+    try {
+      new URL(url);
+    } catch (e) {
+      return res.status(400).json({ ok:false, error:'Invalid URL format' });
+    }
+    
+    const r = await axios.post('https://urlscan.io/api/v1/scan/',
+      { url, visibility:'public' },
+      { 
+        headers: stripForbidden({ 'API-Key': process.env.URLSCAN_API_KEY || '' }), 
+        timeout: 20000 
+      }
+    );
+    res.json({ ok:true, submission: r.data });
+  } catch (e) { 
+    console.error('URLScan submission error:', e);
+    res.json({ ok:true, submission: null, error:e.message }); 
+  }
+});
+
+app.get('/api/urlscan/result', async (req,res)=>{
+  try {
+    const { uuid } = req.query || {};
+    if (!uuid) return res.status(400).json({ ok:false, error:'uuid required' });
+    
+    const r = await axios.get(`https://urlscan.io/api/v1/result/${uuid}/`, { timeout:20000 });
+    res.json({ ok:true, result: r.data });
+  } catch (e) { 
+    console.error('URLScan result error:', e);
+    res.json({ ok:true, result:null, error:e.message }); 
+  }
+});
+
+// ---------- Error handler + start ----------
+app.use((err,_req,res,_next)=>{ 
+  console.error('Unhandled error:', err); 
+  res.status(500).json({ ok:false, error:'server error' }); 
+});
+
 const port = process.env.PORT || 8080;
-app.listen(port, () => {
-  console.log('🚀 MCP OMNI PRO ENHANCED listening on port', port);
-  console.log('✅ Smart Apify actor selection enabled');
-  console.log('✅ Comprehensive backup systems active');
-  console.log('✅ Intelligent fallback analysis ready');
-  console.log('✅ Enhanced buyer intelligence extraction online');
+app.listen(port, ()=>{
+  console.log('🚀 MCP OMNI PRO listening on', port);
+  console.log('✅ Guardrails active (no private cookies/auth forwarding)');
+  console.log('✅ Google CSE / OSINT / URLScan endpoints ready');
+  console.log('🔧 Crash-resistant fixes applied');
 });

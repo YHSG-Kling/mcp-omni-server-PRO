@@ -30,38 +30,23 @@ app.use(cors({
 
 // ========== MIDDLEWARE SETUP ==========
 
-// ⚡ RESPONSE TIME TRACKING & COMPETITIVE HEADERS
+// Response time tracking
 app.use((req, res, next) => {
   req.startTime = Date.now();
-  
   const originalJson = res.json;
   res.json = function(data) {
     const responseTime = Date.now() - req.startTime;
-    
     res.setHeader('X-Response-Time', `${responseTime}ms`);
-    res.setHeader('X-Competitive-Edge', 'Real-time buyer intelligence');
-    res.setHeader('X-Data-Freshness', 'Live social signals');
-    res.setHeader('X-AI-Powered', 'Claude-4 enhanced');
-    res.setHeader('X-Platform-Coverage', '8+ platforms monitored');
-    
-    if (responseTime > 5000) {
-      console.warn(`⚠️ Slow response: ${req.path} took ${responseTime}ms`);
-    } else if (responseTime < 1000) {
-      console.log(`⚡ Fast response: ${req.path} in ${responseTime}ms`);
-    }
-    
     if (data && typeof data === 'object' && !Buffer.isBuffer(data)) {
       data.processingTime = responseTime;
       data.serverTimestamp = new Date().toISOString();
     }
-    
     return originalJson.call(this, data);
   };
-  
   next();
 });
 
-// 🛡️ BUILT-IN RATE LIMITING (No external dependency)
+// Built-in rate limiting
 const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
 const RATE_LIMIT_MAX = 1000; // max requests per window
@@ -77,7 +62,6 @@ app.use((req, res, next) => {
     }
   }
   
-  // Check current IP
   const clientData = rateLimitMap.get(clientIP) || { count: 0, windowStart: now };
   
   if (now - clientData.windowStart > RATE_LIMIT_WINDOW) {
@@ -90,20 +74,13 @@ app.use((req, res, next) => {
   rateLimitMap.set(clientIP, clientData);
   
   if (clientData.count > RATE_LIMIT_MAX) {
-    return res.status(429).json({ 
-      ok: false, 
-      error: 'Too many requests from this IP, please try again later' 
-    });
+    return res.status(429).json({ ok: false, error: 'Too many requests' });
   }
-  
-  res.setHeader('X-RateLimit-Limit', RATE_LIMIT_MAX);
-  res.setHeader('X-RateLimit-Remaining', Math.max(0, RATE_LIMIT_MAX - clientData.count));
-  res.setHeader('X-RateLimit-Reset', new Date(clientData.windowStart + RATE_LIMIT_WINDOW).toISOString());
   
   next();
 });
 
-// Security: shared header
+// Security header
 app.use((req, res, next) => {
   const expected = process.env.AUTH_TOKEN;
   if (!expected) return next(); // dev mode
@@ -112,53 +89,18 @@ app.use((req, res, next) => {
   next();
 });
 
-// ========== PROCESS PROTECTION & MEMORY MANAGEMENT ==========
-
-// 🧠 MEMORY MANAGEMENT & PROCESS PROTECTION
+// ========== PROCESS PROTECTION ==========
 process.on('unhandledRejection', (err) => {
-  console.error('💥 UNHANDLED REJECTION:', {
-    message: err.message,
-    stack: err.stack?.substring(0, 500),
-    timestamp: new Date().toISOString()
-  });
+  console.error('💥 UNHANDLED REJECTION:', err.message);
 });
 
 process.on('uncaughtException', (err) => {
-  console.error('💥 UNCAUGHT EXCEPTION:', {
-    message: err.message,
-    stack: err.stack?.substring(0, 500),
-    timestamp: new Date().toISOString()
-  });
-  setTimeout(() => {
-    console.log('🔄 Server restarting after uncaught exception...');
-    process.exit(1);
-  }, 1000);
+  console.error('💥 UNCAUGHT EXCEPTION:', err.message);
+  setTimeout(() => process.exit(1), 1000);
 });
-
-setInterval(() => {
-  const memUsage = process.memoryUsage();
-  const memGB = {
-    rss: Math.round(memUsage.rss / 1024 / 1024),
-    heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
-    heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024),
-  };
-  
-  if (memGB.heapUsed > 200) {
-    console.log('📊 Memory usage:', memGB);
-  }
-  
-  if (memGB.heapUsed > 500) {
-    console.warn('⚠️ High memory usage detected:', memGB);
-  }
-}, 60000);
-
-console.log('🛡️ Memory management and process protection enabled');
-console.log('⚡ Response time tracking and competitive headers enabled');
-console.log('🛡️ Built-in rate limiting protection enabled');
 
 // ========== UTILITY FUNCTIONS ==========
 
-// HTTP client helper (with retries)
 function makeClient({ baseURL, headers = {} }) {
   const c = axios.create({ baseURL, headers, timeout: 25000 });
   axiosRetry(c, { 
@@ -169,7 +111,6 @@ function makeClient({ baseURL, headers = {} }) {
   return c;
 }
 
-// Providers registry
 const PROVIDERS = {
   anthropic: {
     baseURL: 'https://api.anthropic.com',
@@ -213,48 +154,22 @@ function client(name) {
 
 // ========== HELPER FUNCTIONS ==========
 
-function shouldUseApify(url) {
-  try {
-    if (!url || typeof url !== 'string') return false;
-    
-    const apifyDomains = [
-      'zillow.com', 'realtor.com', 'redfin.com', 'trulia.com', 
-      'homes.com', 'homesnap.com', 'movoto.com'
-    ];
-    
-    const hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
-    return apifyDomains.some(domain => hostname.includes(domain));
-  } catch (error) {
-    console.warn('⚠️ Error checking if should use Apify for URL:', url, error.message);
-    return false;
-  }
-}
-
 function getPlatformFromUrl(url) {
   try {
     if (!url || typeof url !== 'string') return 'Unknown';
-    
     const hostname = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
     
-    // Real estate platforms
     if (hostname.includes('zillow.com')) return 'Zillow';
     if (hostname.includes('realtor.com')) return 'Realtor.com';
     if (hostname.includes('redfin.com')) return 'Redfin';
     if (hostname.includes('trulia.com')) return 'Trulia';
-    if (hostname.includes('homes.com')) return 'Homes.com';
-    
-    // Social platforms
     if (hostname.includes('instagram.com')) return 'Instagram';
     if (hostname.includes('facebook.com')) return 'Facebook';
     if (hostname.includes('reddit.com')) return 'Reddit';
     if (hostname.includes('youtube.com')) return 'YouTube';
-    if (hostname.includes('nextdoor.com')) return 'Nextdoor';
-    if (hostname.includes('tiktok.com')) return 'TikTok';
-    if (hostname.includes('twitter.com') || hostname.includes('x.com')) return 'Twitter';
     
     return 'Real Estate';
   } catch (error) {
-    console.warn('⚠️ Error detecting platform for URL:', url, error.message);
     return 'Unknown';
   }
 }
@@ -262,24 +177,17 @@ function getPlatformFromUrl(url) {
 function detectPlatform(url) {
   try {
     if (!url || typeof url !== 'string') return 'unknown';
-    
     const urlLower = url.toLowerCase();
     
     if (urlLower.includes('instagram.com')) return 'instagram';
     if (urlLower.includes('facebook.com')) return 'facebook';
-    if (urlLower.includes('nextdoor.com')) return 'nextdoor';
     if (urlLower.includes('reddit.com')) return 'reddit';
     if (urlLower.includes('youtube.com') || urlLower.includes('youtu.be')) return 'youtube';
-    if (urlLower.includes('tiktok.com')) return 'tiktok';
-    if (urlLower.includes('twitter.com') || urlLower.includes('x.com')) return 'twitter';
     if (urlLower.includes('zillow.com')) return 'zillow';
     if (urlLower.includes('realtor.com')) return 'realtor';
-    if (urlLower.includes('redfin.com')) return 'redfin';
-    if (urlLower.includes('trulia.com')) return 'trulia';
     
     return 'web';
   } catch (error) {
-    console.warn('⚠️ Error detecting platform for URL:', url, error.message);
     return 'unknown';
   }
 }
@@ -287,25 +195,18 @@ function detectPlatform(url) {
 function getPlatformName(url) {
   try {
     if (!url || typeof url !== 'string') return 'unknown';
-    
     const hostname = typeof url === 'string' && url.startsWith('http') 
       ? new URL(url).hostname.replace(/^www\./, '').toLowerCase() 
       : url.toLowerCase();
     
     if (hostname.includes('instagram.com')) return 'instagram';
     if (hostname.includes('facebook.com')) return 'facebook';
-    if (hostname.includes('nextdoor.com')) return 'nextdoor';
     if (hostname.includes('reddit.com')) return 'reddit';
     if (hostname.includes('youtube.com')) return 'youtube';
-    if (hostname.includes('tiktok.com')) return 'tiktok';
-    if (hostname.includes('twitter.com') || hostname.includes('x.com')) return 'twitter';
     if (hostname.includes('zillow.com')) return 'zillow';
-    if (hostname.includes('realtor.com')) return 'realtor';
-    if (hostname.includes('redfin.com')) return 'redfin';
     
     return 'social';
   } catch (error) {
-    console.warn('⚠️ Error getting platform name for URL:', url, error.message);
     return 'unknown';
   }
 }
@@ -317,12 +218,7 @@ async function directScrape(url) {
     const response = await axios.get(url, { 
       timeout: 12000,
       headers: { 
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate',
-        'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       },
       maxRedirects: 3
     });
@@ -340,11 +236,8 @@ async function directScrape(url) {
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
-      .trim();
-    
-    text = text.slice(0, 12000);
-    
-    console.log(`✅ Direct scrape success: ${url} (${text.length} chars)`);
+      .trim()
+      .slice(0, 12000);
     
     return {
       url: url,
@@ -377,44 +270,6 @@ function extractZillowBuyerSignals(html) {
   const signals = [];
   
   try {
-    const buyerPatterns = [
-      {
-        pattern: /(\d+)\s*(views?|viewed)/gi,
-        type: 'property_views',
-        extract: (match) => ({
-          text: `Property has ${match[1]} views, indicating active buyer interest`,
-          buyerIndicator: 'high_interest',
-          propertyData: { viewCount: parseInt(match[1]) }
-        })
-      },
-      {
-        pattern: /(saved|favorited)\s*(\d+)\s*times?/gi,
-        type: 'saved_property',
-        extract: (match) => ({
-          text: `Property saved ${match[2]} times by potential buyers`,
-          buyerIndicator: 'serious_interest',
-          propertyData: { saveCount: parseInt(match[2]) }
-        })
-      }
-    ];
-    
-    for (const pattern of buyerPatterns) {
-      const matches = [...html.matchAll(pattern.pattern)];
-      
-      for (const match of matches.slice(0, 3)) {
-        try {
-          const signal = pattern.extract(match);
-          signals.push({
-            ...signal,
-            type: pattern.type,
-            extractedAt: new Date().toISOString()
-          });
-        } catch (extractError) {
-          console.error('Error extracting signal:', extractError);
-        }
-      }
-    }
-    
     if (html.includes('contact agent') || html.includes('request info') || html.includes('schedule tour')) {
       signals.push({
         text: 'Lead capture forms detected - indicates active buyer engagement opportunity',
@@ -448,7 +303,6 @@ function extractUrlsFromText(text) {
 
 // ========== ENHANCED APIFY SYSTEM ==========
 
-// BACKUP SERVER SYSTEM - Multiple Apify account support
 function getBackupApifyClient() {
   const backupTokens = [
     process.env.APIFY_TOKEN_BACKUP_1,
@@ -472,7 +326,6 @@ function getBackupApifyClient() {
   return null;
 }
 
-// ENHANCED APIFY SCRAPING WITH SMART ACTOR SELECTION
 async function runApifyScrape(apify, urls) {
   try {
     const firstUrl = urls[0];
@@ -480,38 +333,18 @@ async function runApifyScrape(apify, urls) {
     
     console.log(`🎯 Smart actor selection for: ${hostname}`);
     
-    // ZILLOW - Multiple tested actors with intelligent fallbacks
     if (hostname.includes('zillow.com')) {
       return await processZillowUrls(apify, urls);
     }
     
-    // REALTOR.COM - Multiple backup actors
     if (hostname.includes('realtor.com')) {
       return await processRealtorUrls(apify, urls);
     }
     
-    // REDFIN - Specialized handling
-    if (hostname.includes('redfin.com')) {
-      return await processRedfinUrls(apify, urls);
-    }
-    
-    // REDDIT - Specialized actor
     if (hostname.includes('reddit.com')) {
       return await processRedditUrls(apify, urls);
     }
     
-    // FACEBOOK - Specialized handling
-    if (hostname.includes('facebook.com')) {
-      return await processFacebookUrls(apify, urls);
-    }
-    
-    // GENERIC REAL ESTATE SITES
-    const realEstateDomains = ['trulia.com', 'homes.com', 'homesnap.com', 'movoto.com'];
-    if (realEstateDomains.some(domain => hostname.includes(domain))) {
-      return await processGenericRealEstateUrls(apify, urls, hostname);
-    }
-    
-    // FALLBACK - Generic web scraper
     return await processGenericUrls(apify, urls);
     
   } catch (error) {
@@ -520,11 +353,9 @@ async function runApifyScrape(apify, urls) {
   }
 }
 
-// ZILLOW-SPECIFIC PROCESSING WITH MULTIPLE BACKUP ACTORS
 async function processZillowUrls(apify, urls) {
   console.log('🏠 Processing Zillow URLs with comprehensive actor system');
   
-  // Verified working Zillow actors (in order of preference)
   const zillowActors = [
     {
       id: 'dtrungtin/zillow-scraper',
@@ -554,32 +385,6 @@ async function processZillowUrls(apify, urls) {
       }
     },
     {
-      id: 'webscrapingai/zillow-scraper',
-      name: 'WebScrapingAI Zillow (Backup 2)',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxItems: urls.length * 10,
-        maxConcurrency: 1,
-        proxyConfiguration: { 
-          useApifyProxy: true,
-          groups: ['RESIDENTIAL'] 
-        }
-      }
-    },
-    {
-      id: 'tugkan/zillow-scraper',
-      name: 'Tugkan Zillow Scraper (Backup 3)',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxItems: urls.length * 8,
-        maxConcurrency: 1,
-        proxyConfiguration: { 
-          useApifyProxy: true,
-          groups: ['RESIDENTIAL']
-        }
-      }
-    },
-    {
       id: 'apify/web-scraper',
       name: 'Generic Web Scraper (Zillow Mode)',
       config: {
@@ -592,56 +397,25 @@ async function processZillowUrls(apify, urls) {
         proxyConfiguration: { 
           useApifyProxy: true,
           groups: ['RESIDENTIAL']
-        },
-        pageFunction: `
-          async function pageFunction(context) {
-            const { request } = context;
-            
-            // Enhanced Zillow data extraction
-            const zillowData = {
-              price: document.querySelector('.notranslate')?.textContent || 
-                     document.querySelector('[data-testid="price"]')?.textContent || '',
-              beds: document.querySelector('[data-testid="bed-value"]')?.textContent || '',
-              baths: document.querySelector('[data-testid="bath-value"]')?.textContent || '',
-              sqft: document.querySelector('[data-testid="sqft-value"]')?.textContent || '',
-              views: document.querySelector('.ds-page-views')?.textContent || '',
-              saves: document.querySelector('.ds-saves')?.textContent || '',
-              daysOnZillow: document.querySelector('.ds-days-on-market')?.textContent || '',
-              tourRequests: document.querySelectorAll('[data-testid="tour-request"]').length,
-              contactForms: document.querySelectorAll('button[data-testid*="contact"], a[href*="contact"]').length,
-              fullText: document.body ? document.body.innerText.slice(0, 8000) : ''
-            };
-            
-            return {
-              url: request.url,
-              title: document.title || '',
-              content: JSON.stringify(zillowData),
-              platform: 'zillow',
-              extractedAt: new Date().toISOString()
-            };
-          }
-        `
+        }
       }
     }
   ];
   
-  // Try each actor until one succeeds
   for (let i = 0; i < zillowActors.length; i++) {
     const actor = zillowActors[i];
     console.log(`🎯 Trying Zillow actor ${i + 1}/${zillowActors.length}: ${actor.name}`);
     
     try {
-      const result = await executeActorWithTimeout(apify, actor, 180); // 3 minutes max
+      const result = await executeActorWithTimeout(apify, actor, 180);
       if (result && result.length > 0) {
         console.log(`✅ SUCCESS with ${actor.name}: ${result.length} items`);
         
-        // Enhance results with buyer intelligence
         return result.map(item => ({
           ...item,
           platform: 'zillow',
           processed: true,
-          actorUsed: actor.name,
-          buyerIntelligence: extractBuyerIntelligenceFromZillow(item)
+          actorUsed: actor.name
         }));
       }
     } catch (actorError) {
@@ -653,7 +427,6 @@ async function processZillowUrls(apify, urls) {
   return createZillowIntelligentFallback(urls);
 }
 
-// REALTOR.COM PROCESSING WITH BACKUPS
 async function processRealtorUrls(apify, urls) {
   console.log('🏘️ Processing Realtor.com URLs with backup actors');
   
@@ -666,16 +439,6 @@ async function processRealtorUrls(apify, urls) {
         maxItems: urls.length * 10,
         proxyConfiguration: { useApifyProxy: true, countryCode: 'US' },
         maxConcurrency: 2
-      }
-    },
-    {
-      id: 'compass/realtor-scraper',
-      name: 'Compass Realtor Scraper (Backup)',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxItems: urls.length * 8,
-        proxyConfiguration: { useApifyProxy: true },
-        maxConcurrency: 1
       }
     }
   ];
@@ -696,7 +459,6 @@ async function processRealtorUrls(apify, urls) {
   return createRealtorIntelligentFallback(urls);
 }
 
-// REDDIT PROCESSING
 async function processRedditUrls(apify, urls) {
   console.log('💬 Processing Reddit URLs');
   
@@ -708,15 +470,6 @@ async function processRedditUrls(apify, urls) {
         startUrls: urls.map(url => ({ url })),
         maxItems: 100,
         includePostComments: true,
-        maxConcurrency: 1
-      }
-    },
-    {
-      id: 'drobnikj/reddit-scraper',
-      name: 'Drobnikj Reddit Scraper (Backup)',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxItems: 50,
         maxConcurrency: 1
       }
     }
@@ -738,113 +491,6 @@ async function processRedditUrls(apify, urls) {
   return createRedditIntelligentFallback(urls);
 }
 
-// REDFIN PROCESSING
-async function processRedfinUrls(apify, urls) {
-  console.log('🔴 Processing Redfin URLs');
-  
-  const redfinActors = [
-    {
-      id: 'apify/web-scraper',
-      name: 'Redfin Web Scraper (Optimized)',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxRequestsPerCrawl: urls.length,
-        useChrome: true,
-        stealth: true,
-        proxyConfiguration: { useApifyProxy: true },
-        maxConcurrency: 1,
-        navigationTimeoutSecs: 45
-      }
-    }
-  ];
-  
-  for (const actor of redfinActors) {
-    try {
-      const result = await executeActorWithTimeout(apify, actor, 90);
-      if (result && result.length > 0) {
-        return result.map(item => ({ ...item, platform: 'redfin', actorUsed: actor.name }));
-      }
-    } catch (error) {
-      console.log(`❌ Redfin actor failed: ${error.message}`);
-    }
-  }
-  
-  return createRedfinIntelligentFallback(urls);
-}
-
-// FACEBOOK PROCESSING
-async function processFacebookUrls(apify, urls) {
-  console.log('📘 Processing Facebook URLs');
-  
-  const facebookActors = [
-    {
-      id: 'apify/web-scraper',
-      name: 'Facebook Web Scraper (Limited)',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxRequestsPerCrawl: urls.length,
-        useChrome: true,
-        stealth: true,
-        proxyConfiguration: { useApifyProxy: true },
-        maxConcurrency: 1,
-        navigationTimeoutSecs: 30
-      }
-    }
-  ];
-  
-  for (const actor of facebookActors) {
-    try {
-      const result = await executeActorWithTimeout(apify, actor, 60);
-      if (result && result.length > 0) {
-        return result.map(item => ({ ...item, platform: 'facebook', actorUsed: actor.name }));
-      }
-    } catch (error) {
-      console.log(`❌ Facebook actor failed (expected): ${error.message}`);
-    }
-  }
-  
-  return createFacebookIntelligentFallback(urls);
-}
-
-// GENERIC REAL ESTATE PROCESSING
-async function processGenericRealEstateUrls(apify, urls, hostname) {
-  console.log(`🏠 Processing generic real estate site: ${hostname}`);
-  
-  const genericActors = [
-    {
-      id: 'apify/web-scraper',
-      name: 'Real Estate Web Scraper',
-      config: {
-        startUrls: urls.map(url => ({ url })),
-        maxRequestsPerCrawl: urls.length,
-        useChrome: true,
-        stealth: true,
-        proxyConfiguration: { useApifyProxy: true },
-        maxConcurrency: 2,
-        navigationTimeoutSecs: 45
-      }
-    }
-  ];
-  
-  for (const actor of genericActors) {
-    try {
-      const result = await executeActorWithTimeout(apify, actor, 90);
-      if (result && result.length > 0) {
-        return result.map(item => ({ 
-          ...item, 
-          platform: hostname.replace('.com', ''), 
-          actorUsed: actor.name 
-        }));
-      }
-    } catch (error) {
-      console.log(`❌ Generic real estate actor failed: ${error.message}`);
-    }
-  }
-  
-  return createGenericRealEstateIntelligentFallback(urls, hostname);
-}
-
-// GENERIC URL PROCESSING
 async function processGenericUrls(apify, urls) {
   console.log('🌐 Processing generic URLs');
   
@@ -878,13 +524,11 @@ async function processGenericUrls(apify, urls) {
   return createGeneralIntelligentFallback(urls);
 }
 
-// ENHANCED ACTOR EXECUTION WITH TIMEOUT AND SMART RETRY
 async function executeActorWithTimeout(apify, actor, timeoutSeconds = 120) {
   const startTime = Date.now();
   
   console.log(`🚀 Starting actor: ${actor.name} (${timeoutSeconds}s timeout)`);
   
-  // Start the actor run
   const run = await apify.post(`/v2/acts/${actor.id}/runs?memory=2048&timeout=${timeoutSeconds + 60}`, actor.config);
   const runId = run?.data?.data?.id;
   
@@ -892,17 +536,14 @@ async function executeActorWithTimeout(apify, actor, timeoutSeconds = 120) {
     throw new Error(`Failed to start actor: ${actor.name}`);
   }
   
-  // Poll for completion with smart intervals
   let attempts = 0;
-  const maxAttempts = Math.ceil(timeoutSeconds / 3); // Check every 3 seconds
-  let waitTime = 2000; // Start with 2 seconds
+  const maxAttempts = Math.ceil(timeoutSeconds / 3);
+  let waitTime = 2000;
   
   while (attempts < maxAttempts) {
-    // Check if we've exceeded our timeout
     if (Date.now() - startTime > timeoutSeconds * 1000) {
       console.log(`⏰ Actor ${actor.name} timed out after ${timeoutSeconds}s`);
       
-      // Try to abort the run
       try {
         await apify.post(`/v2/actor-runs/${runId}/abort`);
       } catch (abortError) {
@@ -922,7 +563,6 @@ async function executeActorWithTimeout(apify, actor, timeoutSeconds = 120) {
       if (runStatus === 'SUCCEEDED' && datasetId) {
         console.log(`🎉 Actor ${actor.name} completed successfully`);
         
-        // Fetch results with retry
         let fetchAttempts = 0;
         while (fetchAttempts < 3) {
           try {
@@ -947,9 +587,8 @@ async function executeActorWithTimeout(apify, actor, timeoutSeconds = 120) {
         throw new Error(`Actor failed with status: ${runStatus}`);
       }
       
-      // Wait before next check (exponential backoff with max)
       await new Promise(resolve => setTimeout(resolve, waitTime));
-      waitTime = Math.min(waitTime * 1.1, 8000); // Max 8 seconds between checks
+      waitTime = Math.min(waitTime * 1.1, 8000);
       attempts++;
       
     } catch (statusError) {
@@ -962,11 +601,9 @@ async function executeActorWithTimeout(apify, actor, timeoutSeconds = 120) {
   throw new Error(`Actor exceeded maximum attempts: ${maxAttempts}`);
 }
 
-// ENHANCED ERROR RECOVERY WITH BACKUP SYSTEMS
 async function runApifyWithBackups(urls) {
   let apify = client('apify');
   
-  // If primary Apify fails, try backups
   if (!apify) {
     apify = getBackupApifyClient();
   }
@@ -981,7 +618,6 @@ async function runApifyWithBackups(urls) {
   } catch (apifyError) {
     console.error('🚨 Primary Apify failed:', apifyError.message);
     
-    // Try backup Apify client
     const backupApify = getBackupApifyClient();
     if (backupApify) {
       try {
@@ -992,19 +628,17 @@ async function runApifyWithBackups(urls) {
       }
     }
     
-    // Ultimate fallback: direct scraping
     console.log('🌐 Falling back to direct scraping...');
     return await fallbackToDirectScraping(urls);
   }
 }
 
-// DIRECT SCRAPING FALLBACK SYSTEM
 async function fallbackToDirectScraping(urls) {
   console.log('🌐 Using direct scraping fallback system');
   
   const results = [];
   
-  for (const url of urls.slice(0, 10)) { // Limit to prevent overload
+  for (const url of urls.slice(0, 10)) {
     try {
       console.log(`🔄 Direct scraping: ${url}`);
       
@@ -1016,18 +650,15 @@ async function fallbackToDirectScraping(urls) {
       ]);
       
       results.push(result);
-      
-      // Rate limiting between requests
       await new Promise(resolve => setTimeout(resolve, 2000));
       
     } catch (error) {
       console.error(`❌ Direct scrape failed for ${url}:`, error.message);
       
-      // Create intelligent error analysis
       results.push({
         url: url,
         title: 'Site Protection Analysis',
-        content: `Advanced site protection detected for ${url}. This indicates high-value content with serious buyer/seller activity. Site security measures suggest premium real estate content worth following up on.`,
+        content: `Advanced site protection detected for ${url}. This indicates high-value content with serious buyer/seller activity.`,
         platform: getPlatformFromUrl(url),
         source: 'protection-analysis',
         errorType: 'protection-detected',
@@ -1044,27 +675,23 @@ async function fallbackToDirectScraping(urls) {
 function createZillowIntelligentFallback(urls) {
   console.log('🧠 Creating intelligent Zillow fallback analysis');
   
-  return urls.map(url => {
-    const urlAnalysis = analyzeZillowUrl(url);
-    
-    return {
-      url: url,
-      title: `Zillow Property Analysis - ${urlAnalysis.location}`,
-      content: `ZILLOW PROPERTY INTELLIGENCE: Property research activity confirmed for ${urlAnalysis.location}. Advanced site protection indicates premium listing with serious buyer engagement patterns.`,
+  return urls.map(url => ({
+    url: url,
+    title: 'Zillow Property Analysis',
+    content: 'ZILLOW PROPERTY INTELLIGENCE: Property research activity confirmed. Advanced site protection indicates premium listing with serious buyer engagement patterns.',
+    platform: 'zillow',
+    source: 'zillow-intelligence',
+    buyerSignals: {
       platform: 'zillow',
-      source: 'zillow-intelligence',
-      buyerSignals: {
-        platform: 'zillow',
-        propertyResearch: true,
-        marketEngagement: 'high',
-        protectionLevel: 'premium',
-        buyerIntent: 'property-specific'
-      },
-      intelligenceScore: 8,
-      scrapedAt: new Date().toISOString(),
-      fallbackReason: 'zillow-protection-detected'
-    };
-  });
+      propertyResearch: true,
+      marketEngagement: 'high',
+      protectionLevel: 'premium',
+      buyerIntent: 'property-specific'
+    },
+    intelligenceScore: 8,
+    scrapedAt: new Date().toISOString(),
+    fallbackReason: 'zillow-protection-detected'
+  }));
 }
 
 function createRealtorIntelligentFallback(urls) {
@@ -1090,160 +717,22 @@ function createRedditIntelligentFallback(urls) {
   }));
 }
 
-function createRedfinIntelligentFallback(urls) {
-  return urls.map(url => ({
-    url: url,
-    title: 'Redfin Property Intelligence',
-    content: 'Redfin property research activity detected. Competitive market analysis and buyer tools engagement identified.',
-    platform: 'redfin',
-    source: 'redfin-intelligence',
-    fallbackReason: 'redfin-protection-detected',
-    buyerSignals: { platform: 'redfin', competitiveAnalysis: true }
-  }));
-}
-
-function createFacebookIntelligentFallback(urls) {
-  return urls.map(url => {
-    let contentType = 'post';
-    let intelligence = 'Facebook real estate engagement detected.';
-    
-    if (url.includes('/groups/')) {
-      contentType = 'group';
-      intelligence = 'Facebook group real estate discussion detected. High buyer/seller intent in community groups.';
-    } else if (url.includes('/marketplace/')) {
-      contentType = 'marketplace';
-      intelligence = 'Facebook Marketplace real estate activity detected. Direct buyer/seller engagement opportunity.';
-    } else if (url.includes('/events/')) {
-      contentType = 'event';
-      intelligence = 'Facebook real estate event detected. Open houses, buyer seminars, or market events.';
-    }
-    
-    return {
-      url: url,
-      title: `Facebook ${contentType.charAt(0).toUpperCase() + contentType.slice(1)} - Real Estate Activity`,
-      content: intelligence,
-      platform: 'facebook',
-      source: 'facebook-intelligence',
-      contentType: contentType,
-      fallbackReason: 'facebook-protection-detected',
-      buyerSignals: { 
-        platform: 'facebook', 
-        socialEngagement: 'high',
-        contentType: contentType
-      }
-    };
-  });
-}
-
-function createGenericRealEstateIntelligentFallback(urls, hostname) {
-  return urls.map(url => ({
-    url: url,
-    title: `${hostname.charAt(0).toUpperCase() + hostname.slice(1)} Property Intelligence`,
-    content: `Real estate platform ${hostname} engagement detected. Property research and buyer activity signals identified.`,
-    platform: hostname.replace('.com', ''),
-    source: 'real-estate-intelligence',
-    fallbackReason: 'site-protection-detected',
-    buyerSignals: { 
-      platform: hostname.replace('.com', ''),
-      propertyResearch: true 
-    }
-  }));
-}
-
 function createGeneralIntelligentFallback(urls) {
   return urls.map(url => ({
     url: url,
     title: 'Real Estate Intelligence Analysis',
-    content: `Real estate platform engagement detected. Advanced site protection encountered, indicating high-value content and serious buyer activity.`,
+    content: 'Real estate platform engagement detected. Advanced site protection encountered, indicating high-value content and serious buyer activity.',
     platform: 'real-estate-intelligence',
     source: 'intelligent-fallback',
     fallbackReason: 'site-protection-detected'
   }));
 }
 
-function analyzeZillowUrl(url) {
-  try {
-    const urlObj = new URL(url);
-    const pathname = urlObj.pathname;
-    
-    let location = 'Unknown Location';
-    let propertyType = 'Property';
-    let pattern = 'general';
-    
-    if (pathname.includes('/homedetails/')) {
-      pattern = 'property-details';
-      propertyType = 'Specific Home';
-      const parts = pathname.split('/');
-      if (parts.length > 3) {
-        location = parts[2].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-      }
-    } else if (pathname.includes('/homes/')) {
-      pattern = 'home-search';
-      propertyType = 'Home Search';
-      if (pathname.includes('-fl_')) {
-        const match = pathname.match(/([^\/]+)-fl_/);
-        if (match) {
-          location = match[1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) + ', FL';
-        }
-      }
-    }
-    
-    return { location, propertyType, pattern };
-  } catch {
-    return { 
-      location: 'Florida Property', 
-      propertyType: 'Real Estate', 
-      pattern: 'zillow-activity' 
-    };
-  }
-}
-
-function extractBuyerIntelligenceFromZillow(item) {
-  try {
-    const content = item.content || '';
-    const intelligence = {
-      priceRange: 'unknown',
-      propertyType: 'unknown',
-      buyerActivity: 'low',
-      marketHeat: 'normal',
-      contactOpportunities: 0
-    };
-    
-    // Extract price information
-    const priceMatch = content.match(/\$[\d,]+/);
-    if (priceMatch) {
-      intelligence.priceRange = priceMatch[0];
-    }
-    
-    // Determine buyer activity level
-    if (content.includes('tour') || content.includes('contact')) {
-      intelligence.buyerActivity = 'high';
-      intelligence.contactOpportunities++;
-    }
-    
-    if (content.includes('saved') || content.includes('favorited')) {
-      intelligence.buyerActivity = 'medium';
-    }
-    
-    // Market heat indicators
-    if (content.includes('views') || content.includes('popular')) {
-      intelligence.marketHeat = 'hot';
-    }
-    
-    return intelligence;
-  } catch (error) {
-    console.error('Error extracting buyer intelligence:', error);
-    return { error: 'extraction_failed' };
-  }
-}
-
 // ========== BASIC ROUTES ==========
 
-// Health checks
 app.get('/', (_req, res) => res.json({ ok:true, service:'MCP OMNI PRO ENHANCED', time:new Date().toISOString() }));
 app.get('/health', (_req, res) => res.status(200).send('OK'));
 
-// Route debug
 app.get('/routes', (_req, res) => {
   try {
     const list = (app._router.stack || [])
@@ -1257,13 +746,12 @@ app.get('/routes', (_req, res) => {
 
 // ========== API ENDPOINTS ==========
 
-// 1) Enhanced Scrape endpoint with backup systems
+// 1) Enhanced Scrape endpoint
 app.post('/api/scrape', async (req, res) => {
   try {
     const { scrapeUrls = [], socialUrls = [], urlCityMap = {}, urlStateMap = {} } = req.body || {};
     
     if (!scrapeUrls.length && !socialUrls.length) {
-      console.log('⚠️ No URLs provided to scrape endpoint');
       return res.json({
         ok: true,
         items: [],
@@ -1284,7 +772,6 @@ app.post('/api/scrape', async (req, res) => {
     // Process scrape URLs with enhanced backup system
     for (const url of scrapeUrls.slice(0, 20)) {
       try {
-        // Use the enhanced Apify system with backups
         const apifyResults = await runApifyWithBackups([url]);
         
         if (apifyResults && apifyResults.length > 0) {
@@ -1300,16 +787,14 @@ app.post('/api/scrape', async (req, res) => {
           continue;
         }
         
-        // If Apify completely fails, use direct scrape
         console.log(`🌐 Direct scrape fallback for: ${url}`);
         const directResult = await Promise.race([
           directScrape(url),
           new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Scrape timeout - site took too long')), 15000)
+            setTimeout(() => reject(new Error('Scrape timeout')), 15000)
           )
         ]);
 
-        console.log(`✅ Direct scrape completed for: ${url}`);
         directResult.city = urlCityMap[url] || '';
         directResult.state = urlStateMap[url] || '';
         items.push(directResult);
@@ -1321,19 +806,15 @@ app.post('/api/scrape', async (req, res) => {
         const city = urlCityMap[url] || 'Unknown';
         const state = urlStateMap[url] || 'Unknown';
         
-        // Enhanced error recovery with buyer intelligence
         items.push({
           url: url,
           title: `${platform} - Advanced Site Protection Detected`,
-          content: `${platform} real estate engagement detected in ${city}, ${state}. Advanced site protection encountered - indicates high-value content with serious buyer activity patterns. Premium security measures suggest quality content worth immediate follow-up.`,
+          content: `${platform} real estate engagement detected in ${city}, ${state}. Advanced site protection encountered.`,
           platform: platform,
           city: city,
           state: state,
           source: 'error-intelligence',
-          buyerSignal: 'protection-detected',
-          intelligenceType: 'error-recovery',
-          confidence: 'high',
-          note: 'Site protection indicates premium content engagement'
+          buyerSignal: 'protection-detected'
         });
       }
     }
@@ -1345,7 +826,7 @@ app.post('/api/scrape', async (req, res) => {
         items.push({
           url: url,
           title: `${platform.charAt(0).toUpperCase() + platform.slice(1)} Post`,
-          content: `Social media content detected on ${platform}. Use comments endpoint for detailed extraction.`,
+          content: `Social media content detected on ${platform}.`,
           platform: platform,
           needsComments: true,
           city: urlCityMap[url] || '',
@@ -1356,12 +837,6 @@ app.post('/api/scrape', async (req, res) => {
         console.error('❌ Social URL error:', error.message);
       }
     }
-    
-    console.log('✅ Scrape complete:', {
-      totalItems: items.length,
-      scrapeItems: items.filter(i => !i.socialPlaceholder).length,
-      socialItems: items.filter(i => i.socialPlaceholder).length
-    });
     
     return res.json({
       ok: true,
@@ -1443,7 +918,7 @@ app.post('/api/comments', async (req, res) => {
       return res.json({ ok: true, url, city, state, items, provider: 'youtube-enhanced' });
     }
 
-    // Zillow Processing with enhanced buyer signals
+    // Zillow Processing
     if (/zillow\.com/i.test(host)) {
       console.log('🏠 Processing Zillow URL for buyer activity signals');
       
@@ -1451,11 +926,7 @@ app.post('/api/comments', async (req, res) => {
         const zillowResponse = await axios.get(url, {
           timeout: 20000,
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
           }
         });
         
@@ -1474,8 +945,6 @@ app.post('/api/comments', async (req, res) => {
           });
         }
         
-        console.log(`✅ Zillow processing: ${buyerSignals.length} buyer signals extracted`);
-        
       } catch (zillowError) {
         console.error('Zillow processing error:', zillowError.message);
         
@@ -1484,8 +953,7 @@ app.post('/api/comments', async (req, res) => {
           author: 'zillow_intelligence',
           text: `Zillow property activity detected in ${city}. Property viewing and buyer interest signals identified.`,
           publishedAt: new Date().toISOString(),
-          synthetic: true,
-          note: 'Zillow buyer activity analysis'
+          synthetic: true
         });
       }
       
@@ -1495,12 +963,11 @@ app.post('/api/comments', async (req, res) => {
         city, 
         state, 
         items, 
-        provider: 'zillow-buyer-intelligence',
-        note: 'Zillow buyer activity analysis completed'
+        provider: 'zillow-buyer-intelligence'
       });
     }
 
-    // Reddit Processing with enhanced actors
+    // Reddit Processing
     if (/reddit\.com/i.test(host)) {
       try {
         const apifyResults = await runApifyWithBackups([url]);
@@ -1552,8 +1019,7 @@ app.post('/api/comments', async (req, res) => {
       city, 
       state, 
       items, 
-      provider: `${platformName}-placeholder`,
-      note: `Platform ${platformName} requires special authentication but engagement detected`
+      provider: `${platformName}-placeholder`
     });
 
   } catch (error) {
@@ -1581,19 +1047,9 @@ app.post('/api/comments', async (req, res) => {
 app.post('/api/discover', async (req, res) => {
   const startTime = Date.now();
   
-// 3) Discovery endpoint
-app.post('/api/discover', async (req, res) => {
-  const startTime = Date.now();
-  
   try {
     const perplex = client('perplexity');
     const { queries = [], location = {}, locations = [], maxResults = 40 } = req.body || {};
-
-    console.log('🔍 Discovery started:', { 
-      queries: queries.length, 
-      locations: locations.length,
-      hasPerplexity: !!perplex
-    });
 
     const qList = Array.isArray(queries) ? queries : [];
     const locs = Array.isArray(locations) && locations.length ? locations.slice(0, 2) : [location];
@@ -1604,101 +1060,88 @@ app.post('/api/discover', async (req, res) => {
     if (perplex && qList.length > 0) {
       try {
         for (const loc of locs.slice(0, 2)) {
-          console.log(`🎯 Processing ${loc.city}, ${loc.state}`);
-          
           const cleanQueries = qList.slice(0, 8).map(q => {
             const cleanQ = q.replace(new RegExp(`\\s+${loc.city}\\s+${loc.state}`, 'gi'), '');
             return `${cleanQ} ${loc.city} ${loc.state}`;
           });
           
-          for (let i = 0; i < cleanQueries.length; i += 2) {
-            const batchQueries = cleanQueries.slice(i, i + 2);
-            
-            for (const query of batchQueries) {
-              console.log(`🔍 Processing query: ${query}`);
+          for (const query of cleanQueries.slice(0, 4)) {
+            try {
+              const payload = {
+                model: 'sonar-pro',
+                messages: [
+                  { 
+                    role: 'system', 
+                    content: 'You are a buyer lead researcher. Find people who want to BUY homes.' 
+                  },
+                  { 
+                    role: 'user', 
+                    content: `Find potential home BUYERS: ${query}` 
+                  }
+                ],
+                stream: false,
+                max_tokens: 600,
+                search_recency_filter: 'month'
+              };
+
+              const response = await perplex.post('/chat/completions', payload, {
+                timeout: 25000
+              });
               
-              try {
-                const payload = {
-                  model: 'sonar-pro',
-                  messages: [
-                    { 
-                      role: 'system', 
-                      content: 'You are a buyer lead researcher. Find people who want to BUY homes and need realtor assistance.' 
-                    },
-                    { 
-                      role: 'user', 
-                      content: `Find potential home BUYERS: ${query}` 
-                    }
-                  ],
-                  stream: false,
-                  max_tokens: 600,
-                  search_recency_filter: 'month'
-                };
+              const data = response.data || {};
 
-                const response = await perplex.post('/chat/completions', payload, {
-                  timeout: 25000
-                });
-                
-                const data = response.data || {};
-                
-                console.log(`✅ Query response:`, {
-                  searchResults: data.search_results?.length || 0,
-                  hasContent: !!data.choices?.[0]?.message?.content
-                });
-
-                if (data.search_results && Array.isArray(data.search_results)) {
-                  for (const result of data.search_results.slice(0, 6)) {
-                    if (result.url && result.url.startsWith('http')) {
-                      const item = {
-                        title: result.title || 'Buyer Intent Content',
-                        url: result.url,
-                        platform: getPlatformFromUrl(result.url),
-                        contentSnippet: result.snippet || 'Content related to home buying interest',
-                        city: loc.city,
-                        state: loc.state,
-                        queryType: query,
-                        buyerRelevance: 5
-                      };
-                      
-                      if (!seen.has(item.url)) {
-                        seen.add(item.url);
-                        allItems.push(item);
-                      }
+              if (data.search_results && Array.isArray(data.search_results)) {
+                for (const result of data.search_results.slice(0, 6)) {
+                  if (result.url && result.url.startsWith('http')) {
+                    const item = {
+                      title: result.title || 'Buyer Intent Content',
+                      url: result.url,
+                      platform: getPlatformFromUrl(result.url),
+                      contentSnippet: result.snippet || 'Content related to home buying interest',
+                      city: loc.city,
+                      state: loc.state,
+                      queryType: query,
+                      buyerRelevance: 5
+                    };
+                    
+                    if (!seen.has(item.url)) {
+                      seen.add(item.url);
+                      allItems.push(item);
                     }
                   }
                 }
-
-                if (data.choices?.[0]?.message?.content) {
-                  const content = data.choices[0].message.content;
-                  const urls = extractUrlsFromText(content);
-                  
-                  for (const url of urls.slice(0, 3)) {
-                    if (url.startsWith('http')) {
-                      const item = {
-                        title: 'AI Discovery',
-                        url: url,
-                        platform: getPlatformFromUrl(url),
-                        contentSnippet: 'Found via AI search',
-                        city: loc.city,
-                        state: loc.state,
-                        queryType: query,
-                        buyerRelevance: 4
-                      };
-                      
-                      if (!seen.has(item.url)) {
-                        seen.add(item.url);
-                        allItems.push(item);
-                      }
-                    }
-                  }
-                }
-
-              } catch (queryError) {
-                console.log(`⚠️ Query timeout, continuing...`);
               }
-              
-              await new Promise(resolve => setTimeout(resolve, 1500));
+
+              if (data.choices?.[0]?.message?.content) {
+                const content = data.choices[0].message.content;
+                const urls = extractUrlsFromText(content);
+                
+                for (const url of urls.slice(0, 3)) {
+                  if (url.startsWith('http')) {
+                    const item = {
+                      title: 'AI Discovery',
+                      url: url,
+                      platform: getPlatformFromUrl(url),
+                      contentSnippet: 'Found via AI search',
+                      city: loc.city,
+                      state: loc.state,
+                      queryType: query,
+                      buyerRelevance: 4
+                    };
+                    
+                    if (!seen.has(item.url)) {
+                      seen.add(item.url);
+                      allItems.push(item);
+                    }
+                  }
+                }
+              }
+
+            } catch (queryError) {
+              console.log(`⚠️ Query timeout, continuing...`);
             }
+            
+            await new Promise(resolve => setTimeout(resolve, 1500));
           }
         }
 
@@ -1709,15 +1152,13 @@ app.post('/api/discover', async (req, res) => {
 
     // Enhanced fallback
     if (allItems.length < 15) {
-      console.log('📝 Adding fallback content...');
-      
       for (const loc of locs.slice(0, 2)) {
         const fallbackItems = [
           {
             title: `Reddit - Pre-approved buyer looking for agent in ${loc.city}`,
             url: `https://www.reddit.com/r/RealEstate/comments/pre_approved_buyer_${loc.city.toLowerCase()}`,
             platform: 'reddit',
-            contentSnippet: `"Just got pre-approved for $350k, looking for a good realtor in ${loc.city} to help me find my first home"`,
+            contentSnippet: `"Just got pre-approved for $350k, looking for a good realtor in ${loc.city}"`,
             city: loc.city,
             state: loc.state,
             buyerRelevance: 9
@@ -1726,7 +1167,7 @@ app.post('/api/discover', async (req, res) => {
             title: `Facebook - Military family needs to buy house in ${loc.city}`,
             url: `https://www.facebook.com/groups/military${loc.city.toLowerCase()}/posts/${Date.now()}`,
             platform: 'facebook',
-            contentSnippet: `"PCS orders to ${loc.city}, need to buy house ASAP, any realtor recommendations for military families?"`,
+            contentSnippet: `"PCS orders to ${loc.city}, need to buy house ASAP"`,
             city: loc.city,
             state: loc.state,
             buyerRelevance: 10
@@ -1747,7 +1188,6 @@ app.post('/api/discover', async (req, res) => {
       .slice(0, maxResults);
 
     const processingTime = Date.now() - startTime;
-    console.log(`✅ Discovery complete: ${improvedItems.length} items in ${processingTime}ms`);
 
     return res.json({
       ok: true,
@@ -1773,33 +1213,6 @@ app.post('/api/fuse-score', (req, res) => {
   try {
     const { items = [], location = {} } = req.body || {};
     const CITY = String(location.city || '').toLowerCase();
-    const HOODS = (location.neighborhoods || []).map(s=>String(s).toLowerCase());
-    const ZIPS  = (location.zipCodes || []).map(z=>String(z));
-
-    const ALLOWED = [
-      'relocating for work','job transfer','moving for work','new role in',
-      'accepted an offer in','pcs orders','permanent change of station','reporting to base'
-    ];
-    const SELLER = [ 'sell my house','home sell','list my home','listing agent','fsbo','preforeclosure' ];
-    const MOVERS = [ 'moving company','moving soon','relocating','job transfer','pcs orders' ];
-
-    const SENSITIVE = [
-      'pregnant','expecting','new baby','newborn','engaged','fiancé','fiance','getting married'
-    ];
-
-    function any(text, list){ 
-      const t = String(text||'').toLowerCase(); 
-      return list.some(k=>t.includes(k)); 
-    }
-    
-    function geoBoost(text){
-      const t = String(text||'').toLowerCase();
-      let b = 0;
-      if (CITY && t.includes(CITY)) b += 1;
-      if (HOODS.some(h => t.includes(h))) b += 1;
-      if (ZIPS.some(z => new RegExp(`\\b${z}\\b`).test(t))) b += 1;
-      return Math.min(b, 2);
-    }
 
     const leads = items.map(r => {
       const txt = String(r.content || '').toLowerCase();
@@ -1813,26 +1226,8 @@ app.post('/api/fuse-score', (req, res) => {
       if (txt.includes('urgent') || txt.includes('asap')) base += 3;
       if (txt.includes('moving') || txt.includes('relocating')) base += 2;
       
-      if (any(txt, SELLER)) {
-        base += 3;
-        r.signals = Array.from(new Set([...(r.signals || []), 'seller-intent']));
-      }
-      
-      if (any(txt, MOVERS)) {
-        base += 2;
-        r.signals = Array.from(new Set([...(r.signals || []), 'mover']));
-      }
+      if (CITY && txt.includes(CITY)) base += 1;
 
-      if (any(txt, ALLOWED)) {
-        base += 2;
-        r.signals = Array.from(new Set([...(r.signals||[]), 'relocation']));
-      }
-      
-      if (any(txt, SENSITIVE)) {
-        r._transientSensitive = true;
-      }
-
-      base += geoBoost(txt);
       const score = Math.max(0, Math.min(10, base));
 
       return {

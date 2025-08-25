@@ -11,6 +11,9 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const axiosRetry = require('axios-retry').default;
+const fs = require('fs').promises;
+const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 
@@ -56,6 +59,21 @@ setInterval(() => {
     }
   }
 }, CLEANUP_INTERVAL);
+// ---------- Storage Setup ----------
+const STORAGE_DIR = process.env.STORAGE_DIR || './storage';
+const DOCUMENTS_DIR = path.join(STORAGE_DIR, 'documents');
+const TEMP_DIR = path.join(STORAGE_DIR, 'temp');
+
+// Initialize storage directories
+(async () => {
+  try {
+    await fs.mkdir(DOCUMENTS_DIR, { recursive: true });
+    await fs.mkdir(TEMP_DIR, { recursive: true });
+    console.log('✅ Storage directories initialized');
+  } catch (e) {
+    console.error('Storage directory creation error:', e);
+  }
+})();
 
 app.use((req, res, next) => {
   try {
@@ -426,7 +444,64 @@ async function runApifyWithBackups(urls) {
     return urls.map(u=>({ url:u, title:'Error Analysis', content:'Fallback analysis.', source:'error-fallback' }));
   }
 }
-
+// ---------- Document Generation Helpers ----------
+function generateCMAHTML(leadData, marketData, comparables, city, state) {
+  const avgPrice = comparables.length > 0 
+    ? comparables.reduce((sum, c) => sum + (c.price || 0), 0) / comparables.length 
+    : 0;
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        .header { background: #2c5aa0; color: white; padding: 30px; text-align: center; }
+        .content { max-width: 800px; margin: 20px auto; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th { background: #f0f0f0; padding: 10px; text-align: left; }
+        td { padding: 10px; border-bottom: 1px solid #ddd; }
+        .summary { background: #f8f9fa; padding: 20px; margin: 20px 0; border-radius: 8px; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h1>Comparative Market Analysis</h1>
+        <h2>${city}, ${state}</h2>
+        <p>Prepared for: ${leadData.firstName || 'Valued Client'} ${leadData.lastName || ''}</p>
+        <p>Date: ${new Date().toLocaleDateString()}</p>
+      </div>
+      
+      <div class="content">
+        <div class="summary">
+          <h3>Market Summary</h3>
+          <p>Average Price: $${Math.round(avgPrice).toLocaleString()}</p>
+          <p>Total Comparables: ${comparables.length}</p>
+        </div>
+        
+        <h3>Comparable Properties</h3>
+        <table>
+          <tr>
+            <th>Address</th>
+            <th>Price</th>
+            <th>Beds/Baths</th>
+            <th>Sq Ft</th>
+          </tr>
+          ${comparables.map(comp => `
+            <tr>
+              <td>${comp.address || 'N/A'}</td>
+              <td>$${(comp.listPrice || 0).toLocaleString()}</td>
+              <td>${comp.bedrooms || 0}/${comp.bathrooms || 0}</td>
+              <td>${comp.sqFt || 'N/A'}</td>
+            </tr>
+          `).join('')}
+        </table>
+      </div>
+    </body>
+    </html>
+  `;
+}
 // ---------- Basic routes ----------
 app.get('/', (_req,res)=>res.json({ ok:true, service:'MCP OMNI PRO', time:new Date().toISOString() }));
 app.get('/health', (_req,res)=>res.status(200).send('OK'));
@@ -916,17 +991,80 @@ app.post('/webhooks/video-complete', (req,res)=>{
   }
 });
 
-// 12) Market report placeholder
-app.post('/api/market-report', (req,res)=>{
+// 12) Enhanced Market report with CMA generation
+app.post('/api/market-report', async (req, res) => {
   try {
     const body = req.body || {};
-    const { city='', state='' } = body;
-    res.json({ ok:true, report_url:`https://example.com/market-report-${encodeURIComponent(city)}-${encodeURIComponent(state)}.pdf` });
+    const { city='', state='', leadData = {}, generateCMA = false } = body;
+    
+    // Get market data from IDX if available
+    let marketData = { comparables: [] };
+    const idxClient = client('idx');
+    
+    if (idxClient && city) {
+      try {
+        const listings = await idxClient.get('/clients/featured', {
+          params: { city, state, startOffset: 0, maxRows: 20 }
+        });
+        marketData.comparables = (listings.data || []).slice(0, 6);
+      } catch (e) {
+        console.error('IDX fetch error:', e);
+      }
+    }
+    
+    if (generateCMA && leadData.firstName) {
+      // Generate CMA HTML
+      const html = generateCMAHTML(leadData, marketData, marketData.comparables || [], city, state);
+      
+      // Save as PDF-ready HTML
+      const htmlBuffer = Buffer.from(html);
+      const filename = `CMA_${leadData.firstName}_${city}_${Date.now()}.html`;
+      
+      // Use internal storage
+      const fileId = crypto.randomBytes(16).toString('hex');
+      const storedFilename = `${fileId}.html`;
+      const filePath = path.join(DOCUMENTS_DIR, storedFilename);
+      
+      await fs.writeFile(filePath, htmlBuffer);
+      
+      const metadata = {
+        id: fileId,
+        originalName: filename,
+        storedName: storedFilename,
+        type: 'cma',
+        leadId: leadData.contactId || '',
+        size: htmlBuffer.length,
+        uploadedAt: new Date().toISOString()
+      };
+      
+      await fs.writeFile(
+        path.join(DOCUMENTS_DIR, `${fileId}.meta.json`),
+        JSON.stringify(metadata, null, 2)
+      );
+      
+      const baseUrl = process.env.MCP_BASE_URL || 'http://localhost:' + port;
+      const cmaUrl = `${baseUrl}/api/storage/download/${fileId}`;
+      
+      res.json({ 
+        ok: true, 
+        report_url: cmaUrl,
+        fileId: fileId,
+        marketData: marketData
+      });
+    } else {
+      // Original simple response
+      res.json({ 
+        ok: true, 
+        report_url: `https://example.com/market-report-${encodeURIComponent(city)}-${encodeURIComponent(state)}.pdf`,
+        marketData: marketData
+      });
+    }
   } catch (e) {
     console.error('Market report error:', e);
-    res.status(500).json({ ok:false, error:'market-report failed' });
+    res.status(500).json({ ok: false, error: 'market-report failed' });
   }
 });
+
 
 // 13) Performance digest
 app.get('/api/performance/digest', (req,res)=>{
@@ -947,7 +1085,67 @@ app.get('/api/performance/digest', (req,res)=>{
     res.status(500).json({ ok:false, error:'performance-digest failed' });
   }
 });
+// 14.5) Storage endpoints
+app.post('/api/storage/upload', express.raw({ type: 'application/pdf', limit: '10mb' }), async (req, res) => {
+  try {
+    const { type = 'document', leadId, filename } = req.query;
+    const fileId = crypto.randomBytes(16).toString('hex');
+    const ext = path.extname(filename || '.pdf');
+    const storedFilename = `${fileId}${ext}`;
+    const filePath = path.join(DOCUMENTS_DIR, storedFilename);
+    
+    await fs.writeFile(filePath, req.body);
+    
+    const metadata = {
+      id: fileId,
+      originalName: filename,
+      storedName: storedFilename,
+      type: type,
+      leadId: leadId,
+      size: req.body.length,
+      uploadedAt: new Date().toISOString(),
+      url: `/api/storage/download/${fileId}`
+    };
+    
+    await fs.writeFile(
+      path.join(DOCUMENTS_DIR, `${fileId}.meta.json`),
+      JSON.stringify(metadata, null, 2)
+    );
+    
+    const baseUrl = process.env.MCP_BASE_URL || `${req.protocol}://${req.get('host')}`;
+    
+    res.json({ 
+      ok: true, 
+      fileId: fileId,
+      url: `${baseUrl}/api/storage/download/${fileId}`,
+      metadata: metadata
+    });
+  } catch (e) {
+    console.error('Storage upload error:', e);
+    res.status(500).json({ ok: false, error: 'Upload failed' });
+  }
+});
 
+app.get('/api/storage/download/:fileId', async (req, res) => {
+  try {
+    const { fileId } = req.params;
+    
+    const metaPath = path.join(DOCUMENTS_DIR, `${fileId}.meta.json`);
+    const metadata = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+    
+    const filePath = path.join(DOCUMENTS_DIR, metadata.storedName);
+    const fileBuffer = await fs.readFile(filePath);
+    
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${metadata.originalName}"`);
+    res.setHeader('Content-Length', fileBuffer.length);
+    
+    res.send(fileBuffer);
+  } catch (e) {
+    console.error('Storage download error:', e);
+    res.status(404).json({ ok: false, error: 'File not found' });
+  }
+});
 // 14) Test Instagram session
 app.get('/api/test-instagram', async (_req,res)=>{
   try {
@@ -1177,7 +1375,28 @@ app.get('/api/urlscan/result', async (req,res)=>{
     res.json({ ok:true, result:null, error:e.message }); 
   }
 });
-
+// ---------- Storage Cleanup Job ----------
+setInterval(async () => {
+  try {
+    const files = await fs.readdir(TEMP_DIR);
+    const now = Date.now();
+    
+    for (const file of files) {
+      const filePath = path.join(TEMP_DIR, file);
+      try {
+        const stats = await fs.stat(filePath);
+        // Delete temp files older than 24 hours
+        if (now - stats.mtimeMs > 24 * 60 * 60 * 1000) {
+          await fs.unlink(filePath);
+        }
+      } catch (e) {
+        console.error('Error processing file:', file, e);
+      }
+    }
+  } catch (e) {
+    console.error('Storage cleanup error:', e);
+  }
+}, 24 * 60 * 60 * 1000); // Run daily
 // ---------- Error handler + start ----------
 app.use((err,_req,res,_next)=>{ 
   console.error('Unhandled error:', err); 
@@ -1185,9 +1404,10 @@ app.use((err,_req,res,_next)=>{
 });
 
 const port = process.env.PORT || 8080;
-app.listen(port, ()=>{
+app.listen(port, () => {
   console.log('🚀 MCP OMNI PRO listening on', port);
   console.log('✅ Guardrails active (no private cookies/auth forwarding)');
   console.log('✅ Google CSE / OSINT / URLScan endpoints ready');
+  console.log('✅ Storage system initialized at:', STORAGE_DIR);
   console.log('🔧 Crash-resistant fixes applied');
 });

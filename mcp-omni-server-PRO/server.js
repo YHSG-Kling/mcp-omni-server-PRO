@@ -936,6 +936,79 @@ app.get('/api/idx/leads', async (_req,res)=>{
     res.status(500).json({ ok:false, error:'idx failed' }); 
   }
 });
+// IDX Property Search
+app.get('/api/idx/properties', async (req, res) => {
+  try {
+    const idx = client('idx');
+    if (!idx) return res.status(400).json({ ok: false, error: 'IDX_ACCESS_KEY not set' });
+    
+    const { city, state, minPrice, maxPrice, bedrooms, bathrooms, propertyType } = req.query;
+    const response = await idx.get('/clients/featured', {
+      params: { 
+        city, 
+        state, 
+        startOffset: 0, 
+        maxRows: 20,
+        minPrice: minPrice || 0,
+        maxPrice: maxPrice || 999999999,
+        bedrooms: bedrooms || '',
+        bathrooms: bathrooms || '',
+        propertyType: propertyType || 'residential'
+      }
+    });
+    
+    res.json({ 
+      ok: true, 
+      properties: response.data || [], 
+      count: (response.data || []).length 
+    });
+  } catch (e) {
+    console.error('IDX property search error:', e);
+    res.status(500).json({ ok: false, error: 'IDX property search failed' });
+  }
+});
+// IDX Market Statistics
+app.get('/api/idx/market-data', async (req, res) => {
+  try {
+    const idx = client('idx');
+    if (!idx) return res.status(400).json({ ok: false, error: 'IDX_ACCESS_KEY not set' });
+    
+    const { city, state } = req.query;
+    if (!city || !state) {
+      return res.status(400).json({ ok: false, error: 'city and state required' });
+    }
+    
+    // Get market statistics
+    const statsResponse = await idx.get('/clients/statistics', { 
+      params: { city, state } 
+    });
+    
+    // Get recent sales for trend analysis
+    const salesResponse = await idx.get('/clients/sold', {
+      params: { 
+        city, 
+        state, 
+        startOffset: 0, 
+        maxRows: 50 
+      }
+    });
+    
+    const marketData = {
+      city,
+      state,
+      statistics: statsResponse.data || {},
+      recentSales: salesResponse.data || [],
+      averagePrice: calculateAveragePrice(salesResponse.data || []),
+      marketTrend: analyzeTrend(salesResponse.data || []),
+      generatedAt: new Date().toISOString()
+    };
+    
+    res.json({ ok: true, marketData });
+  } catch (e) {
+    console.error('IDX market data error:', e);
+    res.status(500).json({ ok: false, error: 'IDX market data failed' });
+  }
+});
 
 // 9) Public records passthrough
 app.post('/api/public-records', async (req,res)=>{

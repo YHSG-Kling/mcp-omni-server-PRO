@@ -158,6 +158,30 @@ const PROVIDERS = {
   apollo: { baseURL:'https://api.apollo.io', env:'APOLLO_API_KEY', headers:k=>({'X-Api-Key':k,'content-type':'application/json'})},
   idx: { baseURL:'https://api.idxbroker.com', env:'IDX_ACCESS_KEY', headers:k=>({accesskey:k, outputtype:'json'})}
 };
+// IDX Helper Functions
+function calculateAveragePrice(sales) {
+  if (!sales || sales.length === 0) return 0;
+  const total = sales.reduce((sum, sale) => sum + (sale.listPrice || 0), 0);
+  return Math.round(total / sales.length);
+}
+
+function analyzeTrend(sales) {
+  if (!sales || sales.length < 2) return 'stable';
+  
+  // Sort by date and compare recent vs older prices
+  const sorted = sales.sort((a, b) => new Date(b.listDate) - new Date(a.listDate));
+  const recent = sorted.slice(0, Math.floor(sorted.length / 2));
+  const older = sorted.slice(Math.floor(sorted.length / 2));
+  
+  const recentAvg = recent.reduce((sum, sale) => sum + (sale.listPrice || 0), 0) / recent.length;
+  const olderAvg = older.reduce((sum, sale) => sum + (sale.listPrice || 0), 0) / older.length;
+  
+  const change = ((recentAvg - olderAvg) / olderAvg) * 100;
+  
+  if (change > 5) return 'rising';
+  if (change < -5) return 'declining';
+  return 'stable';
+}
 
 function client(name) {
   try {
@@ -518,7 +542,44 @@ app.get('/routes', (req,res)=>{
     res.json({ ok:false, error:String(e?.message||e) }); 
   }
 });
+// IDX Lead Cross-Reference
+app.post('/api/idx/cross-reference', async (req, res) => {
+  try {
+    const { email, phone, firstName, lastName } = req.body;
+    const idx = client('idx');
+    if (!idx) return res.status(400).json({ ok: false, error: 'IDX not configured' });
+    
+    const existingLeadsResponse = await idx.get('/leads/lead');
+    const existingLeads = existingLeadsResponse.data || [];
+    
+    const matches = existingLeads.filter(lead => {
+      const emailMatch = email && lead.email && lead.email.toLowerCase() === email.toLowerCase();
+      const phoneMatch = phone && lead.phone && lead.phone.replace(/\D/g, '') === phone.replace(/\D/g, '');
+      const nameMatch = firstName && lastName && lead.firstName && lead.lastName &&
+        lead.firstName.toLowerCase() === firstName.toLowerCase() &&
+        lead.lastName.toLowerCase() === lastName.toLowerCase();
+      
+      return emailMatch || phoneMatch || nameMatch;
+    });
+    
+    res.json({ 
+      ok: true, 
+      matches: matches,
+      isExisting: matches.length > 0,
+      matchedBy: matches.length > 0 ? getMatchReason(matches[0], { email, phone, firstName, lastName }) : null
+    });
+  } catch (e) {
+    console.error('IDX cross-reference error:', e);
+    res.status(500).json({ ok: false, error: 'IDX cross-reference failed' });
+  }
+});
 
+function getMatchReason(match, searchCriteria) {
+  if (searchCriteria.email && match.email === searchCriteria.email) return 'email';
+  if (searchCriteria.phone && match.phone === searchCriteria.phone) return 'phone';
+  if (searchCriteria.firstName && match.firstName === searchCriteria.firstName) return 'name';
+  return 'unknown';
+}
 // ---------- API endpoints ----------
 
 // 1) Enhanced scrape (public)

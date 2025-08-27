@@ -385,7 +385,7 @@ async function sendUrgentAgentAlert(leadData) {
     
     // Gmail notification setup
     if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
-      const transporter = nodemailer.createTransporter({
+      const transport = nodemailer.createTransporter({
         service: 'gmail',
         auth: {
           user: process.env.GMAIL_USER,
@@ -435,10 +435,10 @@ async function sendUrgentAgentAlert(leadData) {
         `
       };
 
-      await transporter.sendMail(mailOptions);
+      await transport.sendMail(mailOptions);
       console.log('Urgent lead alert email sent successfully');
     }
-     catch (e) {
+  }catch (e) {
     console.error('Urgent campaign failed:', e);
   }
 }

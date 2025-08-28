@@ -19,6 +19,11 @@ const http = require('http');
 const https = require('https');
 
 const app = express();
+const fs = require('fs');
+
+
+const marketKBPath = path.join(__dirname, 'kb', 'market_hub_config.json');
+const marketKnowledgeBase = JSON.parse(fs.readFileSync(marketKBPath, 'utf8'));
 
 // Enhanced connection pooling
 const httpAgent = new http.Agent({

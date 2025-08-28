@@ -19,7 +19,6 @@ const http = require('http');
 const https = require('https');
 
 const app = express();
-const fs = require('fs');
 
 
 const marketKBPath = path.join(__dirname, 'kb', 'market_hub_config.json');

@@ -1,0 +1,294 @@
+// 🎯 ENHANCED MARKET CONFIG HUB - Complete Implementation
+const MARKETS = [
+  { city: "Pace", state: "Florida", stateCode: "FL", zipCodes: 
+["32571","32570"], neighborhoods: ["stonebrook","pace mill 
+creek","stonechase","hammersmith","ashley plantation"] },
+  { city: "Milton", state: "Florida", stateCode: "FL", zipCodes: 
+["32570","32583"], neighborhoods: ["cottonwood","the moors"] },
+  { city: "Pensacola", state: "Florida", stateCode: "FL", zipCodes: 
+["32501","32502","32503","32504"], neighborhoods: ["east hill","cordova 
+park"] },
+  { city: "Navarre", state: "Florida", stateCode: "FL", zipCodes: 
+["32566"], neighborhoods: ["holley by the sea","villa of 
+viscaya","whispering pines","secret isle estates"] },
+  { city: "Destin", state: "Florida", stateCode: "FL", zipCodes: 
+["32541"], neighborhoods: ["crystal beach","destiny"] }
+];
+
+}
+const MCP_BASE = "https://mcp-omni-server-pro-production.up.railway.app";
+const MCP = {
+  leadIntelligenceServer: MCP_BASE,
+  dataFusionServer: MCP_BASE, 
+  complianceServer: MCP_BASE,
+  performanceServer: MCP_BASE
+};
+
+return [{
+  json: {
+    marketConfig: MARKETCONFIG,
+    markets: MARKETS,
+    dataSources: DATASOURCES,
+    mcp: MCP,
+    authToken: AUTH_TOKEN,
+    mcpBaseUrl: MCP_BASE,
+    igSessionId: IG_SESSION_ID,
+    instagram: MARKETCONFIG.instagram
+  }
+}];
+
+
+heygenAvatarId: "26150900734341998505f64c24ec6e8f",
+heygenVoiceId: "fe1adcdb375c4ae5a7e171124d205ca4",
+
+// Get Instagram session with validation
+function getInstagramSession() {
+  const sources = [
+    process.env.IG_SESSIONID,
+    process.env.INSTAGRAM_SESSION_ID,
+    
+"76591751110%3Ayrmi5FgQZjgTXg%3A22%3AAYefFMkIq3keH9QozxgbQXTkCyDwjDYlCMp2TZu4DQ"
+  ];
+  
+  for (const session of sources) {
+    if (session && session.length > 20 && session.includes('%3A')) {
+      return session;
+    }
+  }
+  
+  console.warn('No valid Instagram session found');
+  return null;
+}
+
+const IG_SESSION_ID = getInstagramSession();
+// Social Media Intelligence
+  instagram: {
+    sessionId: IG_SESSION_ID,
+    enabled: !!IG_SESSION_ID && IG_SESSION_ID.length > 10,
+    actor: process.env.IG_ACTOR || "epctex~instagram-comments-scraper",
+    maxComments: 150,
+    timeout: 180000,
+    retries: 2
+  },
+ghl: {locationId: "WnNOA3W5ggkAy6uJWYmE",
+calendarId: "3w16QC7sbqeofsc3inHh",
+    customFields: {
+      finalIntentScore: "FTSBqOvCyZjcKh5sKAzw",
+      intentSignals: "7JTsWu2mAu4NPylqxdhS", 
+      intentSources: "wqLebC3yzwL1AkgZmAuC",
+      platformCount: "wojioIpRd1Z0walxeKyi",
+      urgencyLevel: "9aYmqohwjmYYmRTCI4Hu",
+      predictedTimeline: "8LzuNNGImt7kBVt7WsCj",
+      city: "12zMOvTFptfLNGknmKZP",
+      state: "B7NXj5rNNxRvoCE2uu01",
+      lastSeenAt: "rOliJwJGtJXmqp6YG8YF",
+      videoUrl: "sazgrv9UTIX17SKQR9Hm",
+      abVariant: "da3InpyRO7Vgh1ndEUDJ"
+    }
+  }
+};
+
+const DEFAULT = MARKETS[0];
+const AUTH_TOKEN = "c7f9e2_8743925617_super_secret";
+
+// Enhanced Google CSE Query Database
+const ENHANCED_BUYER_INTENT_QUERIES = [
+  // TIER 1: IMMEDIATE ACTION (Score 9-10)
+  `"just got pre-approved" OR "mortgage approved" ${DEFAULT.city} 
+${DEFAULT.state}`,
+  `"cash buyer ready" OR "cash offer ready" ${DEFAULT.city} 
+${DEFAULT.state}`,
+  `"need realtor immediately" OR "urgent agent needed" ${DEFAULT.city} 
+${DEFAULT.state}`,
+  `"closing in 30 days" OR "must close soon" ${DEFAULT.city} 
+${DEFAULT.state}`,
+  
+  // TIER 2: HIGH FINANCIAL READINESS (Score 8-9)
+  `"pre-approved mortgage" "looking for homes" ${DEFAULT.city} 
+${DEFAULT.state}`,
+  `"down payment ready" "house hunting" ${DEFAULT.city} ${DEFAULT.state}`,
+  `"VA loan approved" ${DEFAULT.city} ${DEFAULT.state} 2024 OR 2025`,
+  `"FHA approved" "buying house" ${DEFAULT.city} ${DEFAULT.state}`,
+  
+  // TIER 3: ACTIVE SHOPPING (Score 7-8)
+  `site:zillow.com "saved search" "${DEFAULT.city} ${DEFAULT.state}"`,
+  `site:realtor.com "price alert" "${DEFAULT.city} ${DEFAULT.state}"`,
+  `"scheduled showings" OR "toured homes" ${DEFAULT.city} 
+${DEFAULT.state}`,
+  `"made offer" OR "offer rejected" ${DEFAULT.city} ${DEFAULT.state}`,
+  
+  // TIER 4: SOCIAL PLATFORM BEHAVIOR (Score 6-7)
+  `site:reddit.com "moving to ${DEFAULT.city}" "need realtor"`,
+  `site:reddit.com "${DEFAULT.city} real estate" "buying house"`,
+  `site:facebook.com "${DEFAULT.city} home buyers" group`,
+  `site:nextdoor.com "${DEFAULT.city}" "realtor recommendation"`
+];
+const DATASOURCES = {
+  perplexity: {
+    enabled: true,
+    queries: BUYER_INTENT_DISCOVERY_QUERIES
+  },
+  realEstateWebsites: {
+    enabled: true,
+    monitoring: [
+      "zillow property views Pace Florida",
+      "zillow saved searches Milton Florida", 
+      "zillow price alerts Pensacola Florida",
+      "realtor.com showing requests Navarre Florida",
+      "realtor.com mortgage calculator Destin Florida",
+      "redfin tour requests Pace Florida",
+      "redfin competitive analysis Milton Florida"
+    ]
+  }
+};
+// Military-specific queries for Florida
+const MILITARY_BUYER_QUERIES = [
+  `"PCS orders Pensacola" OR "PCS orders Eglin" housing`,
+  `"Eglin AFB housing" OR "NAS Pensacola housing" off-base`,
+  `"military relocation Florida" VA loan`,
+  `"Hurlburt Field" off-base housing buying`,
+  `"military family" "${DEFAULT.city} Florida" home purchase`,
+  `"VA loan" "${DEFAULT.city} Florida" first time buyer`
+];
+
+// Seasonal optimization (August focus)
+const SEASONAL_BUYER_QUERIES = [
+  `"hurricane insurance" ${DEFAULT.city} Florida home buying`,
+  `"flood zone" ${DEFAULT.city} Florida house hunting`,
+  `"school year ${DEFAULT.city}" home buying timing`,
+  `"buying before winter" ${DEFAULT.city} ${DEFAULT.state}`
+];
+
+const ENHANCED_MARKET_CONFIG = {
+  // Core agent configuration
+  agentName: "Deborah Kling",
+  agentFirstName: "Deborah", 
+  agentPhone: "(850) 502-8600",
+  agentEmail: "info@theklinggroup.com",
+  agentAlertEmail: "info@theklinggroup.com",
+  brokerageName: "Your Home Sold Guaranteed Realty Kling Group",
+  authToken: AUTH_TOKEN,
+
+  // Market configuration
+  city: DEFAULT.city,
+  state: DEFAULT.state,
+  stateCode: DEFAULT.stateCode,
+  zipCodes: DEFAULT.zipCodes,
+  neighborhoods: DEFAULT.neighborhoods,
+
+  // Enhanced query system
+  enhancedBuyerIntentQueries: ENHANCED_BUYER_INTENT_QUERIES,
+  militaryBuyerQueries: MILITARY_BUYER_QUERIES,
+  seasonalBuyerQueries: SEASONAL_BUYER_QUERIES,
+
+  // Tool optimization
+  toolConfiguration: {
+    googleCSE: {
+      maxQueriesPerExecution: 5,
+      priorityOrder: ['immediate', 'high_priority', 'standard'],
+      expectedResultsPerQuery: 8,
+      dateRestrictions: ['d7', 'm1', 'm3']
+    },
+    zenRows: {
+      premiumSites: ['zillow.com', 'realtor.com', 'redfin.com'],
+      standardSites: ['facebook.com', 'instagram.com'],
+      costOptimization: true
+    },
+    apify: {
+      optimalPlatforms: ['reddit.com', 'youtube.com'],
+      backupTokens: ['backup1', 'backup2'],
+      timeoutSettings: 120
+    }
+  },
+// Add after ENHANCED_MARKET_CONFIG definition
+performanceTracking: {
+  enableAnalyticsDashboard: true,
+  trackingEndpoint: 
+"https://mcp-omni-server-pro-production.up.railway.app/api/analytics/dashboard",
+  costLimitDaily: 100,
+  urgentLeadWebhook: 
+"https://mcp-omni-server-pro-production.up.railway.app/webhook/urgent-lead"
+}
+  // Deduplication settings
+  leadManagement: {
+    enableDeduplication: true,
+    duplicateCheckMethods: ['email', 'phone', 'name_location'],
+    cacheProcessedURLs: true,
+    enhanceExistingLeads: true,
+    duplicateAction: 'enhance'
+  },
+
+  // Performance tracking
+  analytics: {
+    trackProcessingTime: true,
+    trackAPICosts: true,
+    trackConversionRates: true,
+    generateReports: true,
+    alertThresholds: {
+      maxDailySpend: 100,
+      minLeadQuality: 6,
+      maxProcessingTime: 360000 // 6 minutes
+    }
+  },
+
+  // Competitive settings
+  competitiveSettings: {
+    urgentResponseTime: 300, // 5 minutes
+    highPriorityResponseTime: 900, // 15 minutes
+    standardResponseTime: 3600, // 1 hour
+    targetResponseTime: 300,
+    benchmarkAgents: ['zillow_premier', 'local_competitors']
+  },
+
+  // Legal compliance
+  legalCompliance: {
+    tcpaEnabled: true,
+    fairHousingCompliant: true,
+    consentRequired: true,
+    callTimeRestrictions: true,
+    requiredDisclosures: [
+      "Equal Housing Opportunity",
+      "Text STOP to opt out",
+      "Licensed Real Estate Professional"
+    ]
+  },
+
+  // Quality control
+  qualityControl: {
+    minimumIntentScore: 4,
+    requireContactHint: false,
+    requireGeographicMatch: true,
+    maxProcessingRetries: 3,
+    failureHandling: 'continue'
+  }
+};
+
+  // Document settings
+  documentSettings: {
+    generateCMA: true,
+    generateMarketReport: true,
+    storageBaseUrl: 
+"https://mcp-omni-server-pro-production.up.railway.app" // FIXED: Added 
+quotes
+  },
+
+  // Calendar settings
+  calendarSettings: {
+    defaultShowingDuration: 60,
+    bufferBetweenShowings: 30,
+    maxShowingsPerDay: 3,
+    availableDays: [1, 2, 3, 4, 5, 6],
+    availableHours: {
+      start: 9,
+      end: 19
+    }
+  }
+};
+git add new-folder/KB.md
+git commit -m "Add new folder with README"
+git push
+ timestamp: new Date().toISOString(),
+    sessionId: `session_${Date.now()}`,
+    workflowVersion: "omni-mcp-pro-v0.107.0-BUYER-INTENT-ENHANCED"
+
+return [{ json: ENHANCED_MARKET_CONFIG }];

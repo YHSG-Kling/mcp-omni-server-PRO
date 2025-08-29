@@ -19,6 +19,11 @@ const http = require('http');
 const https = require('https');
 
 const app = express();
+app.get("/api/market-config", (req, res) => {
+  res.json(MARKETCONFIG);
+});
+
+
 let MARKETCONFIG;
 
 try {

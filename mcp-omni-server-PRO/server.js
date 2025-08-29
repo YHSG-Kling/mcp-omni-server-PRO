@@ -352,6 +352,77 @@ app.post('/api/leads/deduplicate', async (req, res) => {
     res.json({ isDuplicate: false, canProceed: true });
   }
 });
+// 📘 Shared Memory Path
+const SHARED_MEMORY_PATH = path.join(__dirname, "shared_memory.json");
+
+// ✅ Helper to load memory
+function loadSharedMemory() {
+  try {
+    const data = fs.readFileSync(SHARED_MEMORY_PATH, "utf8");
+    return JSON.parse(data || "[]");
+  } catch (err) {
+    console.error("❌ Error reading shared_memory.json:", err.message);
+    return [];
+  }
+}
+
+// ✅ Helper to save memory
+function saveSharedMemory(memory) {
+  try {
+    fs.writeFileSync(SHARED_MEMORY_PATH, JSON.stringify(memory, null, 2), "utf8");
+    return true;
+  } catch (err) {
+    console.error("❌ Error writing to shared_memory.json:", err.message);
+    return false;
+  }
+}
+
+// ✅ GET: /api/shared-memory?name=&email=&phone=
+app.get("/api/shared-memory", (req, res) => {
+  const { name, email, phone } = req.query;
+  const memory = loadSharedMemory();
+
+  const filtered = memory.filter(entry => {
+    return (
+      (!name || (entry.name && entry.name.toLowerCase().includes(name.toLowerCase()))) &&
+      (!email || (entry.email && entry.email.toLowerCase() === email.toLowerCase())) &&
+      (!phone || (entry.phone && entry.phone.includes(phone)))
+    );
+  });
+
+  res.json(filtered);
+});
+
+// ✅ POST: /api/shared-memory
+app.post("/api/shared-memory", (req, res) => {
+  const { name, email, phone, agent, message, metadata = {} } = req.body;
+
+  if (!name && !email && !phone) {
+    return res.status(400).json({ error: "Missing identifying fields (name/email/phone)" });
+  }
+
+  const memory = loadSharedMemory();
+
+  const newEntry = {
+    id: `mem_${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    name,
+    email,
+    phone,
+    agent,
+    message,
+    metadata
+  };
+
+  memory.push(newEntry);
+  const success = saveSharedMemory(memory);
+
+  if (success) {
+    res.json({ success: true, entry: newEntry });
+  } else {
+    res.status(500).json({ error: "Failed to save memory" });
+  }
+});
 
 async function checkGHLForDuplicate(email, phone, firstName, lastName) {
   try {

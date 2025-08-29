@@ -19,10 +19,17 @@ const http = require('http');
 const https = require('https');
 
 const app = express();
+let MARKETCONFIG;
 
+try {
+  const configPath = path.join(__dirname, "market_hub_config.json");
+  const fileContent = fs.readFileSync(configPath, "utf8");
+  MARKETCONFIG = JSON.parse(fileContent);
+} catch (error) {
+  console.error("❌ Error loading market_hub_config.json:", error.message);
+  MARKETCONFIG = {}; // fallback so server doesn't crash
+}
 
-const marketKBPath = path.join(__dirname, 'kb', 'market_hub_config.json');
-const marketKnowledgeBase = JSON.parse(fs.readFileSync(marketKBPath, 'utf8'));
 
 // Enhanced connection pooling
 const httpAgent = new http.Agent({

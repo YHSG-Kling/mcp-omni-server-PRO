@@ -230,5 +230,3 @@
   "igSessionId": "76591751110%3Ayrmi5FgQZjgTXg%3A22%3AAYefFMkIq3keH9QozxgbQXTkCyDwjDYlCMp2TZu4DQ"
 }
     workflowVersion: "omni-mcp-pro-v0.107.0-BUYER-INTENT-ENHANCED"
-
-return [{ json: ENHANCED_MARKET_CONFIG }];

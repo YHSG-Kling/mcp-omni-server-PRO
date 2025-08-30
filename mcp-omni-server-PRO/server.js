@@ -17,7 +17,7 @@ const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-
+const puppeteer = require('puppeteer');
 const app = express();
 app.get("/api/market-config", (req, res) => {
   res.json(MARKETCONFIG);
@@ -211,7 +211,52 @@ const TEMP_DIR = path.join(STORAGE_DIR, 'temp');
     console.error('Storage directory creation error:', e);
   }
 })();
+async function htmlToPdfBuffer(html) {
+  const browser = await puppeteer.launch({ headless: true });
+  const page = await browser.newPage();
+  await page.setContent(html, { waitUntil: 'networkidle0' });
+  const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
+  await browser.close();
+  return pdfBuffer;
+}
 
+app.post('/api/cma-report', async (req, res) => {
+  try {
+    const { city, state, leadId, reportHtml } = req.body;
+    const filename = `cma_${leadId}_${Date.now()}.pdf`;
+    const filePath = path.join(DOCUMENTS_DIR, filename);
+
+    // Convert HTML to PDF using Puppeteer
+    const pdfBuffer = await htmlToPdfBuffer(reportHtml);
+    await fs.writeFile(filePath, pdfBuffer);
+
+    res.json({
+      ok: true,
+      documentUrl: `${req.protocol}://${req.get('host')}/documents/${filename}`
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/market-report', async (req, res) => {
+  try {
+    const { city, state, reportHtml } = req.body;
+    const filename = `market_report_${city}_${state}_${Date.now()}.pdf`;
+    const filePath = path.join(DOCUMENTS_DIR, filename);
+
+    // Convert HTML to PDF using Puppeteer
+    const pdfBuffer = await htmlToPdfBuffer(reportHtml);
+    await fs.writeFile(filePath, pdfBuffer);
+
+    res.json({
+      ok: true,
+      documentUrl: `${req.protocol}://${req.get('host')}/documents/${filename}`
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 // Utility functions
 const FORBIDDEN_FORWARD_HEADERS = ['cookie','authorization','x-ig-sessionid','x-fb-cookie','x-nd-cookie'];
 

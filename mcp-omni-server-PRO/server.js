@@ -17,8 +17,9 @@ const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const puppeteer = require('puppeteer');
+const { htmlToPdfBuffer } = require('./pdf');
 const app = express();
+app.use(express.json());
 app.get("/api/market-config", (req, res) => {
   res.json(MARKETCONFIG);
 });
@@ -211,14 +212,6 @@ const TEMP_DIR = path.join(STORAGE_DIR, 'temp');
     console.error('Storage directory creation error:', e);
   }
 })();
-async function htmlToPdfBuffer(html) {
-  const browser = await puppeteer.launch({ headless: true });
-  const page = await browser.newPage();
-  await page.setContent(html, { waitUntil: 'networkidle0' });
-  const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
-  await browser.close();
-  return pdfBuffer;
-}
 
 app.post('/api/cma-report', async (req, res) => {
   try {

@@ -19,6 +19,7 @@ const http = require('http');
 const https = require('https');
 const { htmlToPdfBuffer } = require('./pdf');
 const app = express();
+const { MCPClient } = require('@modelcontextprotocol/client');
 app.use(express.json());
 app.get("/api/market-config", (req, res) => {
   res.json(MARKETCONFIG);
@@ -212,43 +213,20 @@ const TEMP_DIR = path.join(STORAGE_DIR, 'temp');
     console.error('Storage directory creation error:', e);
   }
 })();
-
+app.use('/documents', express.static(DOCUMENTS_DIR));
+// For sellers (CMA)
 app.post('/api/cma-report', async (req, res) => {
-  try {
-    const { city, state, leadId, reportHtml } = req.body;
-    const filename = `cma_${leadId}_${Date.now()}.pdf`;
-    const filePath = path.join(DOCUMENTS_DIR, filename);
-
-    // Convert HTML to PDF using Puppeteer
-    const pdfBuffer = await htmlToPdfBuffer(reportHtml);
-    await fs.writeFile(filePath, pdfBuffer);
-
-    res.json({
-      ok: true,
-      documentUrl: `${req.protocol}://${req.get('host')}/documents/${filename}`
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  // Accept { city, state, leadId, reportHtml }
+  // Generate PDF using Puppeteer or your chosen tool
+  // Save to the documents directory
+  // Respond with { ok: true, documentUrl: 'https://.../documents/cma_<leadId>.pdf' }
 });
 
+// For buyers (market report)
 app.post('/api/market-report', async (req, res) => {
-  try {
-    const { city, state, reportHtml } = req.body;
-    const filename = `market_report_${city}_${state}_${Date.now()}.pdf`;
-    const filePath = path.join(DOCUMENTS_DIR, filename);
-
-    // Convert HTML to PDF using Puppeteer
-    const pdfBuffer = await htmlToPdfBuffer(reportHtml);
-    await fs.writeFile(filePath, pdfBuffer);
-
-    res.json({
-      ok: true,
-      documentUrl: `${req.protocol}://${req.get('host')}/documents/${filename}`
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  // Accept { city, state, reportHtml }
+  // Generate PDF and save it
+  // Respond with { ok: true, documentUrl: 'https://.../documents/market_report_<city>_<state>.pdf' }
 });
 // Utility functions
 const FORBIDDEN_FORWARD_HEADERS = ['cookie','authorization','x-ig-sessionid','x-fb-cookie','x-nd-cookie'];

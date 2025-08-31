@@ -17,7 +17,6 @@ const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const { htmlToPdfBuffer } = require('./pdf');
 const app = express();
 const { MCPClient } = require('@modelcontextprotocol/client');
 app.use(express.json());

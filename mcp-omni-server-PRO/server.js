@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
 const app = express();
-const { MCPClient } = require('@modelcontextprotocol/client');
+const fetch = require('node-fetch');
 app.use(express.json());
 app.get("/api/market-config", (req, res) => {
   res.json(MARKETCONFIG);
@@ -214,19 +214,82 @@ const TEMP_DIR = path.join(STORAGE_DIR, 'temp');
 })();
 app.use('/documents', express.static(DOCUMENTS_DIR));
 // For sellers (CMA)
+
 app.post('/api/cma-report', async (req, res) => {
-  // Accept { city, state, leadId, reportHtml }
-  // Generate PDF using Puppeteer or your chosen tool
-  // Save to the documents directory
-  // Respond with { ok: true, documentUrl: 'https://.../documents/cma_<leadId>.pdf' }
+  const { reportHtml, leadId } = req.body;
+  const docRaptorApiKey = process.env.DOCRAPTOR_API_KEY;
+  try {
+    // Send HTML to DocRaptor
+    const docRaptorResponse = await fetch(`https://${docRaptorApiKey}@api.docraptor.com/docs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        test: false,                    // set to true for watermarked test PDFs
+        document_content: reportHtml,   // your HTML string
+        name: `cma_${leadId}.pdf`,
+        type: 'pdf'
+      })
+    });
+    const pdfBuffer = await docRaptorResponse.buffer();
+
+    // Save PDF in your documents folder
+    const filename = `cma_${leadId}_${Date.now()}.pdf`;
+    const filePath = path.join(DOCUMENTS_DIR, filename);
+    await fs.writeFile(filePath, pdfBuffer);
+
+    res.json({ ok: true, documentUrl: `${req.protocol}://${req.get('host')}/documents/${filename}` });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 // For buyers (market report)
+
 app.post('/api/market-report', async (req, res) => {
-  // Accept { city, state, reportHtml }
-  // Generate PDF and save it
-  // Respond with { ok: true, documentUrl: 'https://.../documents/market_report_<city>_<state>.pdf' }
+  const { city, state, reportHtml } = req.body;
+  const apiKey = process.env.DOCRAPTOR_API_KEY;
+
+  if (!city || !state || !reportHtml) {
+    return res.status(400).json({ ok: false, error: 'city, state and reportHtml are required' });
+  }
+
+  try {
+    // Call DocRaptor to convert HTML into a PDF
+    const response = await fetch(`https://${apiKey}@api.docraptor.com/docs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        test: false,                   // set to true if you want a watermarked test PDF
+        document_content: reportHtml, // use your HTML content
+        name: `market_report_${city}_${state}.pdf`,
+        type: 'pdf'
+      })
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`DocRaptor returned status ${response.status}: ${errorBody}`);
+    }
+
+    const pdfBuffer = await response.buffer();
+
+    // Save the PDF to the documents folder
+    const filename  = `market_report_${city}_${state}_${Date.now()}.pdf`;
+    const filePath  = path.join(DOCUMENTS_DIR, filename);
+    await fs.writeFile(filePath, pdfBuffer);
+
+    // Respond with the URL of the saved report
+    res.json({
+      ok: true,
+      documentUrl: `${req.protocol}://${req.get('host')}/documents/${filename}`
+    });
+
+  } catch (err) {
+    console.error('Market report generation error:', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
+
 // Utility functions
 const FORBIDDEN_FORWARD_HEADERS = ['cookie','authorization','x-ig-sessionid','x-fb-cookie','x-nd-cookie'];
 

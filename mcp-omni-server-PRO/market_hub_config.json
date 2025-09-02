@@ -1,7 +1,4 @@
 {
-  "timestamp": "2025-08-27T00:00:00Z",
-  "sessionId": "session_static",
-  "workflowVersion": "omni-mcp-pro-v0.107.0-BUYER-INTENT-ENHANCED",
   "mcpBaseUrl": "https://mcp-omni-server-pro-production.up.railway.app",
   "authToken": "c7f9e2_8743925617_super_secret",
 
@@ -231,4 +228,3 @@
 
   "igSessionId": "76591751110%3Ayrmi5FgQZjgTXg%3A22%3AAYefFMkIq3keH9QozxgbQXTkCyDwjDYlCMp2TZu4DQ"
 }
-    workflowVersion: "omni-mcp-pro-v0.107.0-BUYER-INTENT-ENHANCED"

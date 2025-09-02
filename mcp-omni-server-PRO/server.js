@@ -12,7 +12,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const axiosRetry = require('axios-retry').default;
-const fs = require('fs').promises;
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
@@ -28,12 +28,12 @@ app.get("/api/market-config", (req, res) => {
 let MARKETCONFIG;
 
 try {
-  const configPath = path.join(__dirname, "market_hub_config.json");
-  const fileContent = fs.readFileSync(configPath, "utf8");
-  MARKETCONFIG = JSON.parse(fileContent);
+  const configPath  = path.join(__dirname, 'market_hub_config.json');
+  const fileContent = fs.readFileSync(configPath, 'utf8');
+  MARKETCONFIG      = JSON.parse(fileContent);
 } catch (error) {
-  console.error("❌ Error loading market_hub_config.json:", error.message);
-  MARKETCONFIG = {}; // fallback so server doesn't crash
+  console.error('❌ Error loading market_hub_config.json:', error.message);
+  MARKETCONFIG = {};
 }
 
 

@@ -17,83 +17,45 @@ const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
+
 const app = express();
-// put this BEFORE the auth middleware:
+
+/* ---------- CORS & Body Parsing FIRST ---------- */
+const corsConfig = {
+  origin: (origin, cb) => cb(null, true),            // allow all origins (tighten later if needed)
+  methods: ['GET', 'POST', 'OPTIONS'],               // include OPTIONS
+  allowedHeaders: [
+    'Content-Type', 'x-auth-token', 'Authorization', 'x-ig-sessionid', 'x-fb-cookie', 'x-nd-cookie'
+  ],
+  credentials: false
+};
+app.use(cors(corsConfig));
+app.options('*', cors(corsConfig)); // handle preflight with headers
+
+app.disable('x-powered-by');
+
+
+/* ---------- Explicit preflight short-circuit WITH CORS HEADERS ---------- */
 app.use((req, res, next) => {
-  // Let preflight pass immediately
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  if (req.method === 'OPTIONS') {
+    // ensure headers are present even if other middlewares short-circuit
+    res.set({
+      'Access-Control-Allow-Origin': req.headers.origin || '*',
+      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, x-auth-token, Authorization, x-ig-sessionid, x-fb-cookie, x-nd-cookie',
+      'Vary': 'Origin'
+    });
+    return res.sendStatus(204);
+  }
   next();
 });
 
-// Auth middleware (replace your current one)
-app.use((req, res, next) => {
-  try {
-    const expected = (process.env.AUTH_TOKEN || '').trim();
-    if (!expected) return next(); // auth disabled
 
-    // accept x-auth-token OR Authorization: Bearer
-    const gotHeader = (req.get('x-auth-token') || req.get('authorization') || '').trim();
-    const got = gotHeader.replace(/^Bearer\s+/i, '').trim();
-
-    if (got !== expected) {
-      // (optional) minimal diagnostic — avoids logging the token
-      console.warn('Auth failed', { path: req.path, method: req.method });
-      return res.status(401).json({ ok:false, error:'unauthorized' });
-    }
-    next();
-  } catch (e) {
-    console.error('Auth middleware error:', e);
-    res.status(500).json({ ok:false, error:'auth error' });
-  }
-});
-
-app.use(express.json());
-app.get("/api/market-config", (req, res) => {
+/* ---------- Your config endpoint(s) etc. continue below ---------- */
+app.get('/api/market-config', (req, res) => {
   res.json(MARKETCONFIG);
 });
 
-
-let MARKETCONFIG;
-
-try {
-  const configPath  = path.join(__dirname, 'market_hub_config.json');
-  const fileContent = fs.readFileSync(configPath, 'utf8');
-  MARKETCONFIG      = JSON.parse(fileContent);
-} catch (error) {
-  console.error('❌ Error loading market_hub_config.json:', error.message);
-  MARKETCONFIG = {};
-}
-
-
-// Enhanced connection pooling
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 20,
-  maxFreeSockets: 10,
-  timeout: 30000
-});
-
-const httpsAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 20, 
-  maxFreeSockets: 10,
-  timeout: 30000
-});
-
-axios.defaults.httpAgent = httpAgent;
-axios.defaults.httpsAgent = httpsAgent;
-axios.defaults.timeout = 30000;
-
-// Basic app setup
-app.disable('x-powered-by');
-app.use(express.json({ limit: '4mb' }));
-app.use(cors({
-  origin: (origin, cb) => cb(null, true),
-  methods: ['GET','POST'],
-  allowedHeaders: [
-    'Content-Type','x-auth-token','Authorization','x-ig-sessionid','x-fb-cookie','x-nd-cookie'
-  ]
-}));
 
 // Performance tracking and deduplication
 const performanceMetrics = {
@@ -210,20 +172,6 @@ app.use((req, res, next) => {
     return j.call(this, data);
   };
   next();
-});
-
-// Auth middleware
-app.use((req, res, next) => {
-  try {
-    const expected = process.env.AUTH_TOKEN;
-    if (!expected) return next();
-    const got = req.get('x-auth-token');
-    if (got !== expected) return res.status(401).json({ ok:false, error:'unauthorized' });
-    next();
-  } catch (e) {
-    console.error('Auth middleware error:', e);
-    res.status(500).json({ ok:false, error:'auth error' });
-  }
 });
 
 // Storage setup

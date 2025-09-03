@@ -2064,7 +2064,9 @@ app.post('/api/osint/resolve', async (req, res) => {
 
 // Perplexity Discovery
 // inside app.post('/api/discover'...)
-const err = [];
+
+app.post('/api/discover', async (req, res) => {
+  const err = [];
 if (!Array.isArray(queries)) err.push('queries must be an array of strings');
 else if (!queries.every(q => typeof q === 'string')) err.push('queries items must be strings');
 
@@ -2077,7 +2079,6 @@ if (typeof maxResults !== 'undefined' && Number.isNaN(Number(maxResults))) err.p
 
 if (err.length) return res.status(400).json({ ok: false, error: 'invalid_request', details: err });
 
-app.post('/api/discover', async (req, res) => {
   const t0 = Date.now();
   try {
     const perplex = client('perplexity');

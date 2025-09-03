@@ -340,7 +340,6 @@ function makeClient({ baseURL, headers = {} }) {
 }
 
 const PROVIDERS = {
-  openai: { baseURL:'https://api.openai.com', env:'OPENAI_API_KEY', headers:k=>({'x-api-key':k','content-type':'application/json'})},
   anthropic: { baseURL:'https://api.anthropic.com', env:'ANTHROPIC_API_KEY', headers:k=>({'x-api-key':k,'anthropic-version':'2023-06-01','content-type':'application/json'})},
   heygen: { baseURL:'https://api.heygen.com', env:'HEYGEN_API_KEY', headers:k=>({'X-API-Key':k,'content-type':'application/json'})},
   perplexity: { baseURL:'https://api.perplexity.ai', env:'PERPLEXITY_API_KEY', headers:k=>({Authorization:`Bearer ${k}`,'content-type':'application/json'})},

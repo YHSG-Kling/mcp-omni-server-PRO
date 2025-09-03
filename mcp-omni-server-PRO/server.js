@@ -50,8 +50,6 @@ app.use((req, res, next) => {
   }
   next();
 });
-const fs = require('fs');
-const path = require('path');
 
 // load the config once at boot
 let MARKETCONFIG = {};

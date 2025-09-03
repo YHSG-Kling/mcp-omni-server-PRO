@@ -340,11 +340,15 @@ function makeClient({ baseURL, headers = {} }) {
 }
 
 const PROVIDERS = {
+  openai: {baseURL: 'https://api.openai.com/v1',env: 'OPENAI_API_KEY',headers: k => ({Authorization: `Bearer ${k}`,'content-type': 'application/json'})},
+  heygen: {baseURL: 'https://api.heygen.com',env: 'HEYGEN_API_KEY',headers: k => ({'X-API-Key': k,'content-type': 'application/json'})},
   anthropic: { baseURL:'https://api.anthropic.com', env:'ANTHROPIC_API_KEY', headers:k=>({'x-api-key':k,'anthropic-version':'2023-06-01','content-type':'application/json'})},
   heygen: { baseURL:'https://api.heygen.com', env:'HEYGEN_API_KEY', headers:k=>({'X-API-Key':k,'content-type':'application/json'})},
   perplexity: { baseURL:'https://api.perplexity.ai', env:'PERPLEXITY_API_KEY', headers:k=>({Authorization:`Bearer ${k}`,'content-type':'application/json'})},
   apify: { baseURL:'https://api.apify.com', env:'APIFY_TOKEN', headers:k=>({Authorization:`Bearer ${k}`})},
+  ghl: {baseURL: 'https://services.leadconnectorhq.com',env: 'GHL_ACCESS_TOKEN',headers: k => ({Authorization: `Bearer ${k}`,'content-type': 'application/json'})},
   apollo: { baseURL:'https://api.apollo.io', env:'APOLLO_API_KEY', headers:k=>({'X-Api-Key':k,'content-type':'application/json'})},
+  googleCSE: {baseURL: 'https://www.googleapis.com',env: 'GOOGLE_CSE_KEY',headers: k => ({ 'Content-Type': 'application/json' })},
   idx: { baseURL:'https://api.idxbroker.com', env:'IDX_ACCESS_KEY', headers:k=>({accesskey:k, outputtype:'json'})}
 };
 

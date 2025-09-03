@@ -13,6 +13,7 @@ const cors = require('cors');
 const axios = require('axios');
 const axiosRetry = require('axios-retry').default;
 const fs = require('fs');
+const fsp = fs.promises; // <-- use promises for await fs ops
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
@@ -33,7 +34,6 @@ app.use(cors(corsConfig));
 app.options('*', cors(corsConfig)); // handle preflight with headers
 
 app.disable('x-powered-by');
-
 app.use(express.json({ limit: '4mb' }));
 
 /* ---------- Explicit preflight short-circuit WITH CORS HEADERS ---------- */
@@ -55,9 +55,13 @@ app.use((req, res, next) => {
 let MARKETCONFIG = {};
 try {
   const configPath  = path.join(__dirname, 'market_hub_config.json');
-  const fileContent = fs.readFileSync(configPath, 'utf8');
-  MARKETCONFIG      = JSON.parse(fileContent);
-  console.log('✅ market_hub_config.json loaded:', configPath);
+  if (fs.existsSync(configPath)) {
+    const fileContent = fs.readFileSync(configPath, 'utf8');
+    MARKETCONFIG      = JSON.parse(fileContent || '{}');
+    console.log('✅ market_hub_config.json loaded:', configPath);
+  } else {
+    console.warn('⚠️ market_hub_config.json not found – /api/market-config will return {}');
+  }
 } catch (error) {
   console.error('❌ Error loading market_hub_config.json:', error.message);
   MARKETCONFIG = {}; // keep it defined to avoid crashing the route
@@ -196,8 +200,8 @@ const TEMP_DIR = path.join(STORAGE_DIR, 'temp');
 
 (async () => {
   try {
-    await fs.mkdir(DOCUMENTS_DIR, { recursive: true });
-    await fs.mkdir(TEMP_DIR, { recursive: true });
+    await fsp.mkdir(DOCUMENTS_DIR, { recursive: true }); // <-- use fsp
+    await fsp.mkdir(TEMP_DIR, { recursive: true });      // <-- use fsp
     console.log('Storage directories initialized');
   } catch (e) {
     console.error('Storage directory creation error:', e);
@@ -234,7 +238,7 @@ app.post('/api/cma-report', async (req, res) => {
 
     const filename = `cma_${leadId}_${Date.now()}.pdf`;
     const filePath = path.join(DOCUMENTS_DIR, filename);
-    await fs.writeFile(filePath, pdfBuffer);
+    await fsp.writeFile(filePath, pdfBuffer); // <-- use fsp
 
     res.json({
       ok: true,
@@ -277,7 +281,7 @@ app.post('/api/market-report', async (req, res) => {
 
     const filename  = `market_report_${city}_${state}_${Date.now()}.pdf`;
     const filePath  = path.join(DOCUMENTS_DIR, filename);
-    await fs.writeFile(filePath, pdfBuffer);
+    await fsp.writeFile(filePath, pdfBuffer); // <-- use fsp
 
     res.json({
       ok: true,
@@ -290,6 +294,7 @@ app.post('/api/market-report', async (req, res) => {
   }
 });
 
+// Unified (optional) auth — kept where you placed it
 app.use((req, res, next) => {
   try {
     const expected = (process.env.AUTH_TOKEN || '').trim();
@@ -340,16 +345,15 @@ function makeClient({ baseURL, headers = {} }) {
 }
 
 const PROVIDERS = {
-  openai: {baseURL: 'https://api.openai.com/v1',env: 'OPENAI_API_KEY',headers: k => ({Authorization: `Bearer ${k}`,'content-type': 'application/json'})},
-  heygen: {baseURL: 'https://api.heygen.com',env: 'HEYGEN_API_KEY',headers: k => ({'X-API-Key': k,'content-type': 'application/json'})},
-  anthropic: { baseURL:'https://api.anthropic.com', env:'ANTHROPIC_API_KEY', headers:k=>({'x-api-key':k,'anthropic-version':'2023-06-01','content-type':'application/json'})},
-  heygen: { baseURL:'https://api.heygen.com', env:'HEYGEN_API_KEY', headers:k=>({'X-API-Key':k,'content-type':'application/json'})},
-  perplexity: { baseURL:'https://api.perplexity.ai', env:'PERPLEXITY_API_KEY', headers:k=>({Authorization:`Bearer ${k}`,'content-type':'application/json'})},
-  apify: { baseURL:'https://api.apify.com', env:'APIFY_TOKEN', headers:k=>({Authorization:`Bearer ${k}`})},
-  ghl: {baseURL: 'https://services.leadconnectorhq.com',env: 'GHL_ACCESS_TOKEN',headers: k => ({Authorization: `Bearer ${k}`,'content-type': 'application/json'})},
-  apollo: { baseURL:'https://api.apollo.io', env:'APOLLO_API_KEY', headers:k=>({'X-Api-Key':k,'content-type':'application/json'})},
-  googleCSE: {baseURL: 'https://www.googleapis.com',env: 'GOOGLE_CSE_KEY',headers: k => ({ 'Content-Type': 'application/json' })},
-  idx: { baseURL:'https://api.idxbroker.com', env:'IDX_ACCESS_KEY', headers:k=>({accesskey:k, outputtype:'json'})}
+  openai:     { baseURL:'https://api.openai.com/v1',               env:'OPENAI_API_KEY',        headers:k=>({ Authorization:`Bearer ${k}`, 'content-type':'application/json' })},
+  anthropic:  { baseURL:'https://api.anthropic.com',               env:'ANTHROPIC_API_KEY',     headers:k=>({ 'x-api-key':k,'anthropic-version':'2023-06-01','content-type':'application/json' })},
+  heygen:     { baseURL:'https://api.heygen.com',                  env:'HEYGEN_API_KEY',        headers:k=>({ 'X-API-Key':k, 'content-type':'application/json' })},
+  perplexity: { baseURL:'https://api.perplexity.ai',               env:'PERPLEXITY_API_KEY',    headers:k=>({ Authorization:`Bearer ${k}`, 'content-type':'application/json' })},
+  apify:      { baseURL:'https://api.apify.com',                   env:'APIFY_TOKEN',           headers:k=>({ Authorization:`Bearer ${k}` })},
+  apollo:     { baseURL:'https://api.apollo.io',                   env:'APOLLO_API_KEY',        headers:k=>({ 'X-Api-Key':k, 'content-type':'application/json' })},
+  ghl:        { baseURL:'https://services.leadconnectorhq.com',    env:'GHL_ACCESS_TOKEN',      headers:k=>({ Authorization:`Bearer ${k}`, 'content-type':'application/json' })},
+  googleCSE:  { baseURL:'https://www.googleapis.com',              env:'GOOGLE_CSE_KEY',        headers:_=>({ 'content-type':'application/json' })},
+  idx:        { baseURL:'https://api.idxbroker.com',               env:'IDX_ACCESS_KEY',        headers:k=>({ accesskey:k, outputtype:'json' })}
 };
 
 function client(name) {
@@ -571,6 +575,15 @@ async function sendUrgentAgentAlert(leadData) {
     console.log(`Platform: ${leadData.platform}`);
   } catch (e) {
     console.error('Agent alert failed:', e);
+  }
+}
+
+async function triggerUrgentCampaign(leadData) {
+  try {
+    // placeholder for your campaign kick-off (GHL workflow, SMS, email, etc.)
+    console.log(`Triggering urgent campaign for ${leadData.firstName} ${leadData.lastName}`);
+  } catch (e) {
+    console.error('Urgent campaign trigger failed:', e);
   }
 }
 
@@ -1738,7 +1751,6 @@ function analyzeTrend(sales) {
   const olderAvg = older.reduce((sum, sale) => sum + (sale.listPrice || sale.soldPrice || 0), 0) / older.length;
   
   const change = ((recentAvg - olderAvg) / olderAvg) * 100;
-  
   if (change > 5) return 'rising';
   if (change < -5) return 'declining';
   return 'stable';
@@ -1755,20 +1767,10 @@ function categorizePrice(price) {
 
 function calculateBuyerFit(property, searchParams) {
   let fit = 100;
-  
   const price = property.listPrice || 0;
-  if (price < searchParams.minPrice || price > searchParams.maxPrice) {
-    fit -= 30;
-  }
-  
-  if (searchParams.bedrooms && property.bedrooms !== parseInt(searchParams.bedrooms)) {
-    fit -= 15;
-  }
-  
-  if (searchParams.bathrooms && property.bathrooms < parseFloat(searchParams.bathrooms)) {
-    fit -= 10;
-  }
-  
+  if (price < searchParams.minPrice || price > searchParams.maxPrice) fit -= 30;
+  if (searchParams.bedrooms && property.bedrooms !== parseInt(searchParams.bedrooms)) fit -= 15;
+  if (searchParams.bathrooms && property.bathrooms < parseFloat(searchParams.bathrooms)) fit -= 10;
   return Math.max(0, fit);
 }
 
@@ -1802,14 +1804,10 @@ function analyzePriceDistribution(listings) {
     '400k_500k': 0,
     'over_500k': 0
   };
-  
   listings.forEach(listing => {
     const category = categorizePrice(listing.listPrice);
-    if (ranges[category] !== undefined) {
-      ranges[category]++;
-    }
+    if (ranges[category] !== undefined) ranges[category]++;
   });
-  
   return ranges;
 }
 
@@ -1824,21 +1822,16 @@ function categorizeInventoryLevel(count) {
 function calculateMarketHotness(sales, active) {
   const avgDaysOnMarket = calculateAverageDaysOnMarket(sales);
   const inventoryLevel = active.length;
-  
   let hotness = 50;
-  
   if (avgDaysOnMarket < 30) hotness += 25;
   else if (avgDaysOnMarket > 90) hotness -= 25;
-  
   if (inventoryLevel < 20) hotness += 20;
   else if (inventoryLevel > 100) hotness -= 20;
-  
   return Math.max(0, Math.min(100, hotness));
 }
 
 function assessBuyerCompetition(sales) {
   const avgDaysOnMarket = calculateAverageDaysOnMarket(sales);
-  
   if (avgDaysOnMarket < 20) return 'high';
   if (avgDaysOnMarket < 45) return 'moderate';
   return 'low';
@@ -1847,7 +1840,6 @@ function assessBuyerCompetition(sales) {
 function recommendBuyerTiming(sales, active) {
   const competition = assessBuyerCompetition(sales);
   const inventory = categorizeInventoryLevel(active.length);
-  
   if (competition === 'high' && inventory === 'low') return 'act_immediately';
   if (competition === 'high' || inventory === 'low') return 'act_soon';
   if (competition === 'low' && inventory === 'high') return 'take_time';
@@ -1856,47 +1848,27 @@ function recommendBuyerTiming(sales, active) {
 
 function calculateDataReliability(sales, active, stats) {
   let score = 0;
-  
   if (sales.length >= 20) score += 40;
   else if (sales.length >= 10) score += 25;
   else if (sales.length >= 5) score += 15;
-  
   if (active.length >= 20) score += 30;
   else if (active.length >= 10) score += 20;
   else if (active.length >= 5) score += 10;
-  
   if (Object.keys(stats).length > 0) score += 30;
-  
   return Math.min(100, score);
 }
 
 function generateBuyerRecommendations(marketData) {
   const recommendations = [];
-  
   if (marketData.marketTrends.bestTimeToAct === 'act_immediately') {
-    recommendations.push({
-      priority: 'high',
-      action: 'Schedule showings immediately',
-      reason: 'High competition and low inventory'
-    });
+    recommendations.push({ priority: 'high', action: 'Schedule showings immediately', reason: 'High competition and low inventory' });
   }
-  
   if (marketData.marketTrends.priceDirection === 'rising') {
-    recommendations.push({
-      priority: 'medium',
-      action: 'Consider making offers above asking price',
-      reason: 'Prices are trending upward'
-    });
+    recommendations.push({ priority: 'medium', action: 'Consider making offers above asking price', reason: 'Prices are trending upward' });
   }
-  
   if (marketData.activeListings.inventoryLevel === 'very_low') {
-    recommendations.push({
-      priority: 'high',
-      action: 'Expand search criteria',
-      reason: 'Very limited inventory in current parameters'
-    });
+    recommendations.push({ priority: 'high', action: 'Expand search criteria', reason: 'Very limited inventory in current parameters' });
   }
-  
   return recommendations;
 }
 
@@ -1995,8 +1967,6 @@ function calculateGoogleCSEIntentScore(title, snippet, query) {
   let score = 0;
   const text = `${title} ${snippet}`.toLowerCase();
   const queryText = query.toLowerCase();
-  
-  // High-intent phrases
   if (text.includes('pre-approved') || text.includes('pre approved')) score += 4;
   if (text.includes('cash buyer') || text.includes('cash offer')) score += 4;
   if (text.includes('need realtor') || text.includes('need agent')) score += 3;
@@ -2004,14 +1974,9 @@ function calculateGoogleCSEIntentScore(title, snippet, query) {
   if (text.includes('urgent') || text.includes('asap') || text.includes('immediately')) score += 3;
   if (text.includes('relocating') || text.includes('moving')) score += 2;
   if (text.includes('va loan') || text.includes('military')) score += 2;
-  
-  // Platform-specific scoring
   if (text.includes('zillow') || text.includes('realtor.com')) score += 1;
   if (text.includes('reddit') || text.includes('facebook')) score += 1;
-  
-  // Query relevance bonus
   if (queryText.includes('urgent') || queryText.includes('asap')) score += 1;
-  
   return Math.min(10, score);
 }
 
@@ -2082,7 +2047,6 @@ app.post('/api/osint/resolve', async (req, res) => {
     
     trackAPICost('osint_resolve', totalCost);
     
-    // Sort by relevance
     candidates.sort((a, b) => {
       const aScore = a.confidence + (['instagram', 'facebook', 'linkedin'].includes(a.platform) ? 3 : 
                      ['reddit', 'youtube', 'twitter'].includes(a.platform) ? 2 : 1);

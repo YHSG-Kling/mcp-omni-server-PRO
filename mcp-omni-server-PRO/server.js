@@ -2063,6 +2063,20 @@ app.post('/api/osint/resolve', async (req, res) => {
 });
 
 // Perplexity Discovery
+// inside app.post('/api/discover'...)
+const err = [];
+if (!Array.isArray(queries)) err.push('queries must be an array of strings');
+else if (!queries.every(q => typeof q === 'string')) err.push('queries items must be strings');
+
+const hasLocation = location && typeof location === 'object' && (location.city || location.state);
+const hasLocations = Array.isArray(locations) && locations.every(l => l && typeof l.city === 'string' && typeof l.state === 'string');
+
+if (!hasLocation && !hasLocations) err.push('provide location {city,state} or locations [{city,state}, ...]');
+
+if (typeof maxResults !== 'undefined' && Number.isNaN(Number(maxResults))) err.push('maxResults must be a number');
+
+if (err.length) return res.status(400).json({ ok: false, error: 'invalid_request', details: err });
+
 app.post('/api/discover', async (req, res) => {
   const t0 = Date.now();
   try {

@@ -34,6 +34,7 @@ app.options('*', cors(corsConfig)); // handle preflight with headers
 
 app.disable('x-powered-by');
 
+app.use(express.json({ limit: '4mb' }));
 
 /* ---------- Explicit preflight short-circuit WITH CORS HEADERS ---------- */
 app.use((req, res, next) => {
@@ -49,12 +50,28 @@ app.use((req, res, next) => {
   }
   next();
 });
+const fs = require('fs');
+const path = require('path');
 
+// load the config once at boot
+let MARKETCONFIG = {};
+try {
+  const configPath  = path.join(__dirname, 'market_hub_config.json');
+  const fileContent = fs.readFileSync(configPath, 'utf8');
+  MARKETCONFIG      = JSON.parse(fileContent);
+  console.log('✅ market_hub_config.json loaded:', configPath);
+} catch (error) {
+  console.error('❌ Error loading market_hub_config.json:', error.message);
+  MARKETCONFIG = {}; // keep it defined to avoid crashing the route
+}
 
-/* ---------- Your config endpoint(s) etc. continue below ---------- */
+// route: returns the parsed JSON (or {})
 app.get('/api/market-config', (req, res) => {
   res.json(MARKETCONFIG);
 });
+
+
+/* ---------- Your config endpoint(s) etc. continue below ---------- */
 
 
 // Performance tracking and deduplication
@@ -274,6 +291,25 @@ app.post('/api/market-report', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+app.use((req, res, next) => {
+  try {
+    const expected = (process.env.AUTH_TOKEN || '').trim();
+    if (!expected) return next(); // auth disabled
+
+    const gotHeader = (req.get('x-auth-token') || req.get('authorization') || '').trim();
+    const got = gotHeader.replace(/^Bearer\s+/i, '').trim();
+
+    if (got !== expected) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    next();
+  } catch (e) {
+    console.error('Auth middleware error:', e);
+    res.status(500).json({ ok: false, error: 'auth error' });
+  }
+});
+
 // Utility functions
 const FORBIDDEN_FORWARD_HEADERS = ['cookie','authorization','x-ig-sessionid','x-fb-cookie','x-nd-cookie'];
 
@@ -306,6 +342,7 @@ function makeClient({ baseURL, headers = {} }) {
 }
 
 const PROVIDERS = {
+  openai: { baseURL:'https://api.openai.com', env:'OPENAI_API_KEY', headers:k=>({'x-api-key':k','content-type':'application/json'})},
   anthropic: { baseURL:'https://api.anthropic.com', env:'ANTHROPIC_API_KEY', headers:k=>({'x-api-key':k,'anthropic-version':'2023-06-01','content-type':'application/json'})},
   heygen: { baseURL:'https://api.heygen.com', env:'HEYGEN_API_KEY', headers:k=>({'X-API-Key':k,'content-type':'application/json'})},
   perplexity: { baseURL:'https://api.perplexity.ai', env:'PERPLEXITY_API_KEY', headers:k=>({Authorization:`Bearer ${k}`,'content-type':'application/json'})},

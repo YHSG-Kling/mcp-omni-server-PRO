@@ -18,6 +18,34 @@ const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
 const app = express();
+// put this BEFORE the auth middleware:
+app.use((req, res, next) => {
+  // Let preflight pass immediately
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Auth middleware (replace your current one)
+app.use((req, res, next) => {
+  try {
+    const expected = (process.env.AUTH_TOKEN || '').trim();
+    if (!expected) return next(); // auth disabled
+
+    // accept x-auth-token OR Authorization: Bearer
+    const gotHeader = (req.get('x-auth-token') || req.get('authorization') || '').trim();
+    const got = gotHeader.replace(/^Bearer\s+/i, '').trim();
+
+    if (got !== expected) {
+      // (optional) minimal diagnostic — avoids logging the token
+      console.warn('Auth failed', { path: req.path, method: req.method });
+      return res.status(401).json({ ok:false, error:'unauthorized' });
+    }
+    next();
+  } catch (e) {
+    console.error('Auth middleware error:', e);
+    res.status(500).json({ ok:false, error:'auth error' });
+  }
+});
 
 app.use(express.json());
 app.get("/api/market-config", (req, res) => {

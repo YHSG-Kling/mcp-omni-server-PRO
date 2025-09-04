@@ -17,11 +17,16 @@ const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-// DocRaptor for PDF report generation
-const docraptor = require('docraptor');
-
-// Configure DocRaptor
-docraptor.configuration.username = process.env.DOCRAPTOR_API_KEY;
+// Optional DocRaptor for PDF reports - will be enabled when available
+let docraptor = null;
+try {
+  docraptor = require('docraptor');
+  if (process.env.DOCRAPTOR_API_KEY) {
+    docraptor.configuration.username = process.env.DOCRAPTOR_API_KEY;
+  }
+} catch (e) {
+  console.log('DocRaptor not available - PDF reports will use fallback method');
+}
 const app = express();
 // Market Configuration Endpoint
 app.get("/api/market-config", (req, res) => {

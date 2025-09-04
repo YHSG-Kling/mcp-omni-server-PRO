@@ -17,7 +17,11 @@ const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
 const https = require('https');
-const puppeteer = require('puppeteer');
+// DocRaptor for PDF report generation
+const docraptor = require('docraptor');
+
+// Configure DocRaptor
+docraptor.configuration.username = process.env.DOCRAPTOR_API_KEY;
 const app = express();
 // Market Configuration Endpoint
 app.get("/api/market-config", (req, res) => {

@@ -192,6 +192,30 @@ app.use((req, res, next) => {
   };
   next();
 });
+// --- Payload normalizers (tolerate various agent/tool shapes) ---
+function normalizeCSEBody(body = {}) {
+  // Accept { queries: [...] } OR { JSON: { queries: [...] } } OR { queriesString: "a,b,c" }
+  const source = body.JSON && typeof body.JSON === 'object' ? body.JSON : body;
+  let queries = Array.isArray(source.queries) ? source.queries : [];
+  if ((!queries || !queries.length) && typeof source.queriesString === 'string') {
+    queries = source.queriesString.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  const num = Number(source.num) > 0 ? Number(source.num) : 8;
+  const dateRestrict = typeof source.dateRestrict === 'string' ? source.dateRestrict : 'm1';
+  return { queries, num, dateRestrict };
+}
+
+function normalizeDiscoverBody(body = {}) {
+  const source = body.JSON && typeof body.JSON === 'object' ? body.JSON : body;
+  let queries = Array.isArray(source.queries) ? source.queries : [];
+  if ((!queries || !queries.length) && typeof source.queriesString === 'string') {
+    queries = source.queriesString.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  const location = source.location && typeof source.location === 'object' ? source.location : {};
+  const locations = Array.isArray(source.locations) ? source.locations : (Object.keys(location).length ? [location] : []);
+  const maxResults = Number(source.maxResults) > 0 ? Number(source.maxResults) : 40;
+  return { queries, locations, location, maxResults };
+}
 
 // Storage setup
 const STORAGE_DIR = process.env.STORAGE_DIR || './storage';
@@ -1888,42 +1912,36 @@ function generateCompetitiveIntelligence(marketData) {
 app.post('/api/google/cse', async (req, res) => {
   try {
     const key = process.env.GOOGLE_CSE_KEY;
-    const cx = process.env.GOOGLE_CSE_CX;
+    const cx  = process.env.GOOGLE_CSE_CX;
     if (!key || !cx) {
       return res.status(400).json({ ok: false, error: 'GOOGLE_CSE_KEY/GOOGLE_CSE_CX not set' });
     }
-    
-    const body = req.body || {};
-    const { queries = [], num = 8, dateRestrict = 'm1' } = body;
-    
+
+    const { queries, num, dateRestrict } = normalizeCSEBody(req.body);
+
     if (!Array.isArray(queries)) {
       return res.status(400).json({ ok: false, error: 'queries must be an array' });
     }
-    
+
     const g = makeClient({ baseURL: 'https://www.googleapis.com' });
     if (!g) return res.status(500).json({ ok: false, error: 'Failed to create Google client' });
-    
+
     const results = [];
     const uniq = new Set();
     let totalCost = 0;
-    
-    for (const q of queries.slice(0, 5)) { // Limit to 5 queries to avoid rate limits
+
+    for (const q of queries.slice(0, 5)) {
       try {
         const r = await g.get('/customsearch/v1', { 
           params: { key, cx, q, num: Math.min(num, 10), dateRestrict },
           timeout: 15000
         });
-        
-        totalCost += 0.005; // Google CSE cost per query
-        
+        totalCost += 0.005;
         const items = r.data?.items || [];
         for (const it of items) {
           if (!it.link || uniq.has(it.link)) continue;
           uniq.add(it.link);
-          
-          // Enhanced result processing for real estate
           const buyerIntentScore = calculateGoogleCSEIntentScore(it.title, it.snippet, q);
-          
           results.push({ 
             title: it.title || 'Result', 
             url: it.link, 
@@ -1932,36 +1950,38 @@ app.post('/api/google/cse', async (req, res) => {
             source: 'google-cse', 
             query: q, 
             formattedUrl: it.formattedUrl || '',
-            buyerIntentScore: buyerIntentScore,
+            buyerIntentScore,
             platform: getPlatformFromUrl(it.link),
             urgencyLevel: buyerIntentScore >= 8 ? 'high' : buyerIntentScore >= 6 ? 'medium' : 'low'
           });
         }
-        await new Promise(r => setTimeout(r, 200)); // Rate limiting
+        await new Promise(r => setTimeout(r, 200));
       } catch (e) {
         console.error('Google CSE query error:', e);
       }
     }
-    
+
     trackAPICost('google_cse', totalCost);
-    
-    // Sort by intent score for competitive advantage
     results.sort((a, b) => (b.buyerIntentScore || 0) - (a.buyerIntentScore || 0));
-    
-    res.json({ 
+
+    // ↓↓↓ Keep original shape and add a compatibility alias `JSON`
+    const payload = { 
       ok: true, 
       items: results, 
+      JSON: results,         // compatibility alias for n8n nodes expecting "JSON"
       totalQueries: queries.length,
       competitive: {
         highIntentResults: results.filter(r => r.buyerIntentScore >= 8).length,
         urgentOpportunities: results.filter(r => r.urgencyLevel === 'high').length
       }
-    });
+    };
+    res.json(payload);
   } catch (e) { 
     console.error('Google CSE error:', e);
-    res.json({ ok: true, items: [], error: e.message }); 
+    res.json({ ok: true, items: [], JSON: [], error: e.message }); 
   }
 });
+
 
 function calculateGoogleCSEIntentScore(title, snippet, query) {
   let score = 0;
@@ -2066,30 +2086,16 @@ app.post('/api/osint/resolve', async (req, res) => {
 // inside app.post('/api/discover'...)
 
 app.post('/api/discover', async (req, res) => {
-  const err = [];
-if (!Array.isArray(queries)) err.push('queries must be an array of strings');
-else if (!queries.every(q => typeof q === 'string')) err.push('queries items must be strings');
-
-const hasLocation = location && typeof location === 'object' && (location.city || location.state);
-const hasLocations = Array.isArray(locations) && locations.every(l => l && typeof l.city === 'string' && typeof l.state === 'string');
-
-if (!hasLocation && !hasLocations) err.push('provide location {city,state} or locations [{city,state}, ...]');
-
-if (typeof maxResults !== 'undefined' && Number.isNaN(Number(maxResults))) err.push('maxResults must be a number');
-
-if (err.length) return res.status(400).json({ ok: false, error: 'invalid_request', details: err });
-
   const t0 = Date.now();
   try {
     const perplex = client('perplexity');
-    const body = req.body || {};
-    const { queries = [], location = {}, locations = [], maxResults = 40 } = body;
+    const { queries, locations, location, maxResults } = normalizeDiscoverBody(req.body);
     const qList = Array.isArray(queries) ? queries : [];
     const locs = Array.isArray(locations) && locations.length ? locations.slice(0, 2) : [location];
     const all = [];
     const seen = new Set();
     let totalCost = 0;
-    
+
     if (perplex && qList.length) {
       for (const loc of locs.slice(0, 2)) {
         const cleanQs = qList.slice(0, 6).map(q => `${q} ${loc.city || ''} ${loc.state || ''}`.trim());
@@ -2105,9 +2111,9 @@ if (err.length) return res.status(400).json({ ok: false, error: 'invalid_request
               max_tokens: 600, 
               search_recency_filter: 'month'
             }, { timeout: 25000 });
-            
+
             totalCost += 0.02;
-            
+
             const data = r.data || {};
             if (data.search_results && Array.isArray(data.search_results)) {
               for (const rs of data.search_results.slice(0, 6)) {
@@ -2133,21 +2139,25 @@ if (err.length) return res.status(400).json({ ok: false, error: 'invalid_request
         }
       }
     }
-    
+
     trackAPICost('perplexity_discover', totalCost);
-    
-    res.json({ 
+
+    // ↓↓↓ Keep original shape and add `JSON` alias
+    const payload = { 
       ok: true, 
       items: all.slice(0, maxResults), 
+      JSON: all.slice(0, maxResults),     // compatibility alias
       provider: all.length > 10 ? 'perplexity-buyer-focused' : 'buyer-fallback', 
       locations: locs, 
       processingTime: Date.now() - t0 
-    });
+    };
+    res.json(payload);
   } catch (e) { 
     console.error('Discovery endpoint error:', e);
-    res.json({ ok: true, items: [], provider: 'error-fallback', processingTime: Date.now() - t0 }); 
+    res.json({ ok: true, items: [], JSON: [], provider: 'error-fallback', processingTime: Date.now() - t0 }); 
   }
 });
+
 
 // Additional required endpoints (Apollo, HeyGen, Content Generation, etc.)
 app.post('/api/apollo/enrich', async (req, res) => {

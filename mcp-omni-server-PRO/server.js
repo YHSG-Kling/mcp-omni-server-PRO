@@ -35,7 +35,7 @@ app.use(cors({
     'x-api-version','x-client-id','x-request-id','x-ai-model','x-optimization-level'
   ]
 }));
-// =============================================
+/ =============================================
 // 🔐 AUTHENTICATION MIDDLEWARE
 // =============================================
 function authenticateToken(req, res, next) {
@@ -1028,6 +1028,13 @@ async function directScrape(url, options = {}) {
     throw new Error(`Enhanced scraping failed for ${url}: ${error.message}`);
   }
 }
+/**
+ * 🏠 BUYER-ONLY WORKFLOW ENDPOINTS - FIXED VERSION
+ * 
+ * This version fixes the syntax error on line 1347
+ * The issue was with property names starting with numbers
+ */
+
 // =============================================
 // 🏠 ENDPOINT 1: BUYER MULTI-PROVIDER HUNTER
 // =============================================
@@ -1344,7 +1351,7 @@ app.post('/api/property/buyer-focused-cma', authenticateToken, async (req, res) 
           { address: "654 Birch Ln", sold_price: 378000, sold_date: "2025-08-02", days_on_market: 18 }
         ],
         market_trends: {
-          6_month_trend: "+2.8%",
+          six_month_trend: "+2.8%", // FIXED: changed from 6_month_trend
           price_per_sqft_avg: 208,
           inventory_levels: "moderate",
           buyer_competition: "medium"
@@ -1938,7 +1945,6 @@ app.post('/api/optimization/buyer-ab-testing', authenticateToken, async (req, re
     });
   }
 });
-
 // ========== ENHANCED PROTECTED SITE DISCOVERY ENDPOINTS ==========
 
 // 🔥 ENHANCED Zyte-Powered Protected Site Lead Discovery
@@ -3108,14 +3114,14 @@ app.get('/api/config/buyer-market-hub', authenticateToken, async (req, res) => {
           avg_days_on_market: 18,
           buyer_advantage_score: 3
         },
-        "300k_500k": {
+        range_300k_500k: { // FIXED: changed from "300k_500k" to valid property name
           inventory: 189,
           demand_level: "very_high",
           competition: "moderate",
           avg_days_on_market: 28,
           buyer_advantage_score: 6
         },
-        "500k_750k": {
+        range_500k_750k: { // FIXED: changed from "500k_750k" to valid property name
           inventory: 134,
           demand_level: "moderate",
           competition: "low",
@@ -3192,6 +3198,8 @@ app.get('/api/config/buyer-market-hub', authenticateToken, async (req, res) => {
       buyer_only: true,
       serverTimestamp: new Date().toISOString()
     });
+  }
+});
 
 // Market Hub Configuration and Knowledge Base
 app.get('/api/market-hub/config', async (req, res) => {

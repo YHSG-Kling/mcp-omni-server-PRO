@@ -165,7 +165,7 @@ const PROVIDERS = {
   },
   zenrows: { baseURL:'https://api.zenrows.com', env:'ZENROWS_API_KEY', headers:k=>({})},
   google_cse: { baseURL:'https://www.googleapis.com', env:'GOOGLE_CSE_KEY', headers:k=>({})},
-  ghl: { baseURL:'https://services.leadconnectorhq.com', env:'GHL_API_KEY', headers:k=>({Authorization:`Bearer ${k}`,'content-type':'application/json'})},
+  ghl: { baseURL:'https://services.leadconnectorhq.com', env:'GHL_API_KEY', headers:k=>({Authorization:`Bearer ${k}`,'locationId': 'WnNOA3W5ggkAy6uJWYmE','content-type':'application/json'})},
   openai: { baseURL:'https://api.openai.com', env:'OPENAI_API_KEY', headers:k=>({Authorization:`Bearer ${k}`,'content-type':'application/json'})},
   osint: { baseURL:'https://api.hunter.io', env:'OSINT_API_KEY', headers:k=>({'Authorization':`Bearer ${k}`,'content-type':'application/json'})}
 };
